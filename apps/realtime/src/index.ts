@@ -15,6 +15,7 @@ import {
 } from '@watch-with-me/contracts';
 
 type Participant = { id: string; role: 'host' | 'viewer' };
+const MAX_CAS_RETRIES = 3;
 export type StoredParticipant = Participant & {
   tokenHash: string;
   displayName: string;
@@ -156,8 +157,6 @@ export class RoomService {
     return { room, token, participantId: p.id };
   }
   async join(roomCode: string, displayName: string) {
-    const room = await this.repo.get(roomCode.toUpperCase());
-    if (!room) throw new Error('room_not_found');
     const token = secret(32);
     const p: StoredParticipant = {
       id: randomUUID(),
@@ -166,9 +165,14 @@ export class RoomService {
       tokenHash: hash(token),
       online: false,
     };
-    room.participants.set(p.id, p);
-    await this.repo.save(room);
-    return { room, token, participantId: p.id };
+    for (let attempt = 0; attempt < MAX_CAS_RETRIES; attempt++) {
+      const room = await this.repo.get(roomCode.toUpperCase());
+      if (!room) throw new Error('room_not_found');
+      const expected = room.sequence;
+      room.participants.set(p.id, p);
+      if (await this.repo.save(room, expected)) return { room, token, participantId: p.id };
+    }
+    throw new Error('state_conflict');
   }
   async authenticate(roomCode: string, token: string) {
     const room = await this.repo.get(roomCode.toUpperCase());
@@ -176,6 +180,32 @@ export class RoomService {
     const tokenHash = hash(token);
     for (const p of room.participants.values())
       if (same(p.tokenHash, tokenHash)) return { room, participant: p };
+  }
+  async commitCommandWithRetry(
+    roomCode: string,
+    participantId: string,
+    commandId: string,
+    mutate: (room: Room, participant: StoredParticipant) => boolean,
+  ) {
+    for (let attempt = 0; attempt < MAX_CAS_RETRIES; attempt++) {
+      const room = await this.repo.get(roomCode.toUpperCase());
+      if (!room) return { kind: 'missing' as const };
+      const participant = room.participants.get(participantId);
+      if (!participant) return { kind: 'unauthorized' as const };
+      if (room.commands.has(commandId)) return { kind: 'duplicate' as const, room };
+      const expected = room.sequence;
+      if (!mutate(room, participant)) return { kind: 'rejected' as const, room };
+      room.commands.set(commandId, room.sequence);
+      if (room.commands.size > 1000) {
+        const oldest = room.commands.keys().next().value as string | undefined;
+        if (oldest) room.commands.delete(oldest);
+      }
+      room.sequence++;
+      room.revision++;
+      if (room.playback) room.playback.revision = room.revision;
+      if (await this.repo.save(room, expected)) return { kind: 'saved' as const, room };
+    }
+    return { kind: 'conflict' as const };
   }
   snapshot(room: Room): Snapshot {
     return {
@@ -278,7 +308,11 @@ app.post('/api/rooms/:code/join', async (req: Request, res: Response) => {
   const parsed = JoinRoomRequest.safeParse({ ...req.body, roomId: roomCode });
   if (!parsed.success) return fail(res, 400, 'invalid_request');
   try {
-    const x = await rooms.join(roomCode, parsed.data.displayName);
+    let x: Awaited<ReturnType<RoomService['join']>> | undefined;
+    await enqueue(roomCode, async () => {
+      x = await rooms.join(roomCode, parsed.data.displayName);
+    });
+    if (!x) return fail(res, 409, 'state_conflict');
     return res.status(201).json({
       version: CONTRACT_VERSION,
       roomId: x.room.code,
@@ -288,7 +322,9 @@ app.post('/api/rooms/:code/join', async (req: Request, res: Response) => {
       role: 'viewer',
       serverTime: now(),
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.message === 'state_conflict')
+      return fail(res, 409, 'state_conflict');
     return fail(res, 404, 'room_not_found');
   }
 });
@@ -327,8 +363,7 @@ io.use(async (socket, next) => {
 const buckets = new WeakMap<object, { at: number; count: number }>();
 const activeConnections = new Map<string, Set<string>>();
 const roomQueues = new Map<string, Promise<void>>();
-const MAX_CAS_RETRIES = 3;
-const enqueue = (roomCode: string, work: () => Promise<void>) => {
+function enqueue(roomCode: string, work: () => Promise<void>) {
   const previous = roomQueues.get(roomCode) ?? Promise.resolve();
   const next = previous.catch(() => undefined).then(work);
   roomQueues.set(
@@ -338,7 +373,7 @@ const enqueue = (roomCode: string, work: () => Promise<void>) => {
     }),
   );
   return next;
-};
+}
 const commit = async (roomCode: string, mutate: (room: Room) => void) => {
   for (let attempt = 0; attempt < MAX_CAS_RETRIES; attempt++) {
     const authoritative = await rooms.get(roomCode);
@@ -396,7 +431,6 @@ io.on('connection', (socket) => {
       const currentParticipant = room.participants.get(participant.id);
       if (!currentParticipant) return emitError(socket, 'unauthorized');
       const { commandId, command } = envelope.data;
-      const expectedSequence = room.sequence;
       const bucket = buckets.get(socket) ?? { at: Date.now(), count: 0 };
       if (Date.now() - bucket.at > 1000) {
         bucket.at = Date.now();
@@ -452,42 +486,61 @@ io.on('connection', (socket) => {
         });
         return;
       }
-      if (command.type === 'load') {
-        room.playback = {
-          provider: loadCommand.provider,
-          videoId: loadCommand.videoId,
-          status: 'paused',
-          positionSeconds: 0,
-          updatedAt: now(),
-          revision: room.revision + 1,
-        };
-      } else if (room.playback) {
-        const playback: PlaybackSnapshot = {
-          provider: room.playback.provider,
-          videoId: room.playback.videoId,
-          status: room.playback.status,
-          positionSeconds: room.playback.positionSeconds,
-          updatedAt: now(),
-          revision: room.revision + 1,
-        };
-        if (command.type === 'play') playback.status = 'playing';
-        else if (command.type === 'pause') playback.status = 'paused';
-        else if (command.type === 'seek')
-          playback.positionSeconds = (
-            command as Extract<Command, { type: 'seek' }>
-          ).positionSeconds;
-        room.playback = playback;
+      const result = await rooms.commitCommandWithRetry(
+        room.code,
+        participant.id,
+        commandId,
+        (authoritative, currentParticipant) => {
+          if (currentParticipant.role !== 'host') return false;
+          if (command.type === 'load') {
+            authoritative.playback = {
+              provider: loadCommand.provider,
+              videoId: loadCommand.videoId,
+              status: 'paused',
+              positionSeconds: 0,
+              updatedAt: now(),
+              revision: authoritative.revision + 1,
+            };
+          } else if (authoritative.playback) {
+            const playback: PlaybackSnapshot = {
+              ...authoritative.playback,
+              updatedAt: now(),
+              revision: authoritative.revision + 1,
+            };
+            if (command.type === 'play') playback.status = 'playing';
+            else if (command.type === 'pause') playback.status = 'paused';
+            else if (command.type === 'seek') playback.positionSeconds = command.positionSeconds;
+            authoritative.playback = playback;
+          }
+          return true;
+        },
+      );
+      if (result.kind === 'duplicate') {
+        socket.emit('snapshot', {
+          type: 'snapshot',
+          eventId: randomUUID(),
+          sequence: result.room.sequence,
+          revision: result.room.revision,
+          serverTime: now(),
+          data: rooms.snapshot(result.room),
+        });
+        return;
       }
-      room.commands.set(commandId, room.sequence);
-      // Bound replay state so attacker-controlled command IDs cannot grow memory forever.
-      if (room.commands.size > 1000) {
-        const oldest = room.commands.keys().next().value as string | undefined;
-        if (oldest) room.commands.delete(oldest);
+      if (result.kind === 'unauthorized' || result.kind === 'missing')
+        return emitError(socket, result.kind);
+      if (result.kind === 'rejected') {
+        socket.emit('command_rejected', {
+          type: 'command_rejected',
+          eventId: randomUUID(),
+          commandId,
+          sequence: result.room.sequence,
+          revision: result.room.revision,
+          serverTime: now(),
+          reason: 'host_only',
+        });
+        return;
       }
-      room.sequence++;
-      room.revision++;
-      if (room.playback) room.playback.revision = room.revision;
-      if (!(await rooms.save(room, expectedSequence))) {
+      if (result.kind === 'conflict') {
         socket.emit('command_rejected', {
           type: 'command_rejected',
           eventId: randomUUID(),
@@ -502,10 +555,10 @@ io.on('connection', (socket) => {
       io.to(room.code).emit('playback_changed', {
         type: 'playback_changed',
         eventId: randomUUID(),
-        sequence: room.sequence,
-        revision: room.revision,
+        sequence: result.room.sequence,
+        revision: result.room.revision,
         serverTime: now(),
-        data: room.playback,
+        data: result.room.playback,
       });
     });
   socket.on('command', handle);

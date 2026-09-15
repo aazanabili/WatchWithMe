@@ -1,6 +1,14 @@
 import { describe, expect, it, afterAll } from 'vitest';
 import { io as connect, type Socket } from 'socket.io-client';
-import { httpServer, io, rooms } from './index';
+import {
+  httpServer,
+  io,
+  rooms,
+  InMemoryRoomRepository,
+  RoomService,
+  type Room,
+  type RoomRepository,
+} from './index';
 
 let address: string;
 const listen = new Promise<void>((resolve) =>
@@ -21,6 +29,31 @@ const waitForStatus = (socket: Socket, status: string) =>
       }
     }),
   );
+
+class FailSavesRepository implements RoomRepository {
+  readonly inner = new InMemoryRoomRepository();
+  failures: number;
+  constructor(failures: number) {
+    this.failures = failures;
+  }
+  create(room: Room) {
+    return this.inner.create(room);
+  }
+  async get(code: string) {
+    const room = await this.inner.get(code);
+    if (!room) return undefined;
+    return {
+      ...room,
+      participants: new Map([...room.participants].map(([id, p]) => [id, { ...p }])),
+      commands: new Map(room.commands),
+      playback: room.playback ? { ...room.playback } : null,
+    };
+  }
+  async save(room: Room, expected?: number) {
+    if (this.failures-- > 0) return false;
+    return (this.inner as RoomRepository).save(room, expected);
+  }
+}
 
 describe('realtime MVP integration', async () => {
   await listen;
@@ -138,5 +171,88 @@ describe('realtime MVP integration', async () => {
     const final = await rooms.get(created.roomCode);
     expect([...final!.participants.values()][0].online).toBe(false);
     expect(final?.sequence).toBe(7);
+  });
+
+  it('retries command and join CAS without inflating sequence or revision', async () => {
+    const repository = new FailSavesRepository(1);
+    const service = new RoomService(repository);
+    const created = await service.create('deterministic host');
+    const joined = await service.join(created.room.code, 'deterministic viewer');
+    expect(joined.participantId).toBeTruthy();
+    repository.failures = 1;
+    const result = await service.commitCommandWithRetry(
+      created.room.code,
+      created.participantId,
+      'retry-1',
+      (room) => {
+        room.playback = {
+          provider: 'youtube',
+          videoId: 'dQw4w9WgXcQ',
+          status: 'paused',
+          positionSeconds: 0,
+          updatedAt: new Date().toISOString(),
+          revision: room.revision + 1,
+        };
+        return true;
+      },
+    );
+    expect(result.kind).toBe('saved');
+    const saved = await service.get(created.room.code);
+    expect(saved?.sequence).toBe(1);
+    expect(saved?.revision).toBe(1);
+    const duplicate = await service.commitCommandWithRetry(
+      created.room.code,
+      created.participantId,
+      'retry-1',
+      () => {
+        throw new Error('must not apply');
+      },
+    );
+    expect(duplicate.kind).toBe('duplicate');
+    expect((await service.get(created.room.code))?.revision).toBe(1);
+  });
+
+  it('retries concurrent joins through the HTTP boundary', async () => {
+    const created = await fetch(`${address}/api/rooms`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'join host' }),
+    }).then((r) => r.json());
+    const responses = await Promise.all(
+      Array.from({ length: 3 }, (_, i) =>
+        fetch(`${address}/api/rooms/${created.roomCode}/join`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ displayName: `joiner-${i}` }),
+        }),
+      ),
+    );
+    expect(responses.every((response) => response.status === 201)).toBe(true);
+    const state = await fetch(`${address}/api/rooms/${created.roomCode}/state`, {
+      headers: { authorization: `Bearer ${created.token}` },
+    }).then((r) => r.json());
+    expect(state.sequence).toBe(0);
+    expect(state.revision).toBe(0);
+    expect(state.participants).toHaveLength(4);
+  });
+
+  it('returns bounded conflict exhaustion without broadcasting or mutating state', async () => {
+    const repository = new FailSavesRepository(10);
+    const service = new RoomService(repository);
+    const created = await service.create('conflict host');
+    const result = await service.commitCommandWithRetry(
+      created.room.code,
+      created.participantId,
+      'never-saved',
+      (room) => {
+        room.playback = null;
+        return true;
+      },
+    );
+    expect(result.kind).toBe('conflict');
+    const saved = await service.get(created.room.code);
+    expect(saved?.sequence).toBe(0);
+    expect(saved?.revision).toBe(0);
+    expect(saved?.commands.size).toBe(0);
   });
 });
