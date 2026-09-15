@@ -12,6 +12,7 @@ import {
   JoinRoomRequest,
   type PlaybackSnapshot,
   type Snapshot,
+  ServerEvent,
 } from '@watch-with-me/contracts';
 
 type Participant = { id: string; role: 'host' | 'viewer' };
@@ -185,7 +186,7 @@ export class RoomService {
     roomCode: string,
     participantId: string,
     commandId: string,
-    mutate: (room: Room, participant: StoredParticipant) => boolean,
+    mutate: (room: Room, participant: StoredParticipant) => boolean | string,
   ) {
     for (let attempt = 0; attempt < MAX_CAS_RETRIES; attempt++) {
       const room = await this.repo.get(roomCode.toUpperCase());
@@ -194,7 +195,10 @@ export class RoomService {
       if (!participant) return { kind: 'unauthorized' as const };
       if (room.commands.has(commandId)) return { kind: 'duplicate' as const, room };
       const expected = room.sequence;
-      if (!mutate(room, participant)) return { kind: 'rejected' as const, room };
+      const mutationResult = mutate(room, participant);
+      if (!mutationResult) return { kind: 'rejected' as const, room, reason: 'host_only' };
+      if (typeof mutationResult === 'string')
+        return { kind: 'rejected' as const, room, reason: mutationResult };
       room.commands.set(commandId, room.sequence);
       if (room.commands.size > 1000) {
         const oldest = room.commands.keys().next().value as string | undefined;
@@ -335,12 +339,17 @@ app.use((error: unknown, _req: Request, res: Response, next: unknown) => {
   return fail(res, 400, 'invalid_request');
 });
 
+const emitWire = (
+  target: { emit: (event: string, payload: unknown) => void },
+  event: string,
+  payload: unknown,
+) => target.emit(event, ServerEvent.parse(payload));
 const emitError = (
   socket: { emit: (event: string, payload: unknown) => void },
   message: string,
   commandId?: string,
 ) =>
-  socket.emit('error', {
+  emitWire(socket, 'error', {
     type: 'error',
     eventId: randomUUID(),
     ...(commandId ? { commandId } : {}),
@@ -387,7 +396,7 @@ const commit = async (roomCode: string, mutate: (room: Room) => void) => {
 const participantData = (room: Room) =>
   [...room.participants.values()].map(({ id, role }) => ({ id, role }));
 const broadcastParticipants = (room: Room) =>
-  io.to(room.code).emit('participants', {
+  emitWire(io.to(room.code), 'participants', {
     type: 'participants',
     eventId: randomUUID(),
     sequence: room.sequence,
@@ -412,7 +421,7 @@ io.on('connection', (socket) => {
     if (!saved || saved === null) return emitError(socket, 'state_conflict');
     broadcastParticipants(saved);
     socket.emit('ready', { version: CONTRACT_VERSION });
-    socket.emit('snapshot', {
+    emitWire(socket, 'snapshot', {
       type: 'snapshot',
       eventId: randomUUID(),
       sequence: saved.sequence,
@@ -439,7 +448,7 @@ io.on('connection', (socket) => {
       if (++bucket.count > 30) return emitError(socket, 'rate_limited', commandId);
       buckets.set(socket, bucket);
       if (room.commands.has(commandId)) {
-        socket.emit('snapshot', {
+        emitWire(socket, 'snapshot', {
           type: 'snapshot',
           eventId: randomUUID(),
           sequence: room.sequence,
@@ -450,7 +459,7 @@ io.on('connection', (socket) => {
         return;
       }
       if (command.type !== 'request_state' && currentParticipant.role !== 'host') {
-        socket.emit('command_rejected', {
+        emitWire(socket, 'command_rejected', {
           type: 'command_rejected',
           eventId: randomUUID(),
           commandId,
@@ -463,7 +472,7 @@ io.on('connection', (socket) => {
       }
       if (command.type === 'request_state') {
         room.commands.set(commandId, room.sequence);
-        socket.emit('snapshot', {
+        emitWire(socket, 'snapshot', {
           type: 'snapshot',
           eventId: randomUUID(),
           sequence: room.sequence,
@@ -475,7 +484,7 @@ io.on('connection', (socket) => {
       }
       const loadCommand = command as Extract<Command, { type: 'load' }>;
       if (command.type === 'load' && !validateMedia(loadCommand.provider, loadCommand.videoId)) {
-        socket.emit('command_rejected', {
+        emitWire(socket, 'command_rejected', {
           type: 'command_rejected',
           eventId: randomUUID(),
           commandId,
@@ -492,6 +501,11 @@ io.on('connection', (socket) => {
         commandId,
         (authoritative, currentParticipant) => {
           if (currentParticipant.role !== 'host') return false;
+          if (
+            (command.type === 'play' || command.type === 'pause' || command.type === 'seek') &&
+            !authoritative.playback
+          )
+            return 'no_media_loaded';
           if (command.type === 'load') {
             authoritative.playback = {
               provider: loadCommand.provider,
@@ -516,7 +530,7 @@ io.on('connection', (socket) => {
         },
       );
       if (result.kind === 'duplicate') {
-        socket.emit('snapshot', {
+        emitWire(socket, 'snapshot', {
           type: 'snapshot',
           eventId: randomUUID(),
           sequence: result.room.sequence,
@@ -529,19 +543,19 @@ io.on('connection', (socket) => {
       if (result.kind === 'unauthorized' || result.kind === 'missing')
         return emitError(socket, result.kind);
       if (result.kind === 'rejected') {
-        socket.emit('command_rejected', {
+        emitWire(socket, 'command_rejected', {
           type: 'command_rejected',
           eventId: randomUUID(),
           commandId,
           sequence: result.room.sequence,
           revision: result.room.revision,
           serverTime: now(),
-          reason: 'host_only',
+          reason: result.reason,
         });
         return;
       }
       if (result.kind === 'conflict') {
-        socket.emit('command_rejected', {
+        emitWire(socket, 'command_rejected', {
           type: 'command_rejected',
           eventId: randomUUID(),
           commandId,
@@ -552,7 +566,7 @@ io.on('connection', (socket) => {
         });
         return;
       }
-      io.to(room.code).emit('playback_changed', {
+      emitWire(io.to(room.code), 'playback_changed', {
         type: 'playback_changed',
         eventId: randomUUID(),
         sequence: result.room.sequence,

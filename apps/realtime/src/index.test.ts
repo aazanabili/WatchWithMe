@@ -9,6 +9,7 @@ import {
   type Room,
   type RoomRepository,
 } from './index';
+import { ServerEvent } from '@watch-with-me/contracts';
 
 let address: string;
 const listen = new Promise<void>((resolve) =>
@@ -210,6 +211,47 @@ describe('realtime MVP integration', async () => {
     );
     expect(duplicate.kind).toBe('duplicate');
     expect((await service.get(created.room.code))?.revision).toBe(1);
+  });
+
+  it('rejects playback controls without media and validates every server event', async () => {
+    const created = await fetch(`${address}/api/rooms`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'No media host' }),
+    }).then((r) => r.json());
+    const host = connect(address, { auth: { roomCode: created.roomCode, token: created.token } });
+    const invalidEvents: unknown[] = [];
+    host.onAny((name, payload) => {
+      if (
+        ['snapshot', 'participants', 'command_rejected', 'playback_changed', 'error'].includes(name)
+      )
+        invalidEvents.push(ServerEvent.parse(payload));
+    });
+    await waitFor(host, 'snapshot');
+    const initial = await rooms.get(created.roomCode);
+    let playbackChanges = 0;
+    host.on('playback_changed', () => playbackChanges++);
+    for (const [type, payload] of [
+      ['play', {}],
+      ['pause', {}],
+      ['seek', { positionSeconds: 12 }],
+    ] as const) {
+      const rejected = waitFor(host, 'command_rejected');
+      host.emit('command', {
+        version: 'v1',
+        commandId: `no-media-${type}`,
+        command: { type, ...payload },
+      });
+      expect(((await rejected) as { reason: string }).reason).toBe('no_media_loaded');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const final = await rooms.get(created.roomCode);
+    expect(final?.sequence).toBe(initial?.sequence);
+    expect(final?.revision).toBe(initial?.revision);
+    expect(final?.playback).toBeNull();
+    expect(playbackChanges).toBe(0);
+    expect(invalidEvents.length).toBeGreaterThan(0);
+    host.close();
   });
 
   it('retries concurrent joins through the HTTP boundary', async () => {
