@@ -15,6 +15,7 @@ export const PlaybackSnapshot = z
     status: PlaybackStatus,
     positionSeconds: z.number().nonnegative(),
     updatedAt: z.string().datetime(),
+    revision: z.number().int().nonnegative(),
   })
   .strict();
 export type PlaybackSnapshot = z.infer<typeof PlaybackSnapshot>;
@@ -26,6 +27,7 @@ export const Snapshot = z
     snapshot: PlaybackSnapshot.nullable(),
     participants: z.array(Participant),
     sequence: z.number().int().nonnegative(),
+    revision: z.number().int().nonnegative(),
     serverTime: z.string().datetime(),
   })
   .strict();
@@ -67,6 +69,7 @@ export const ServerEvent = z.discriminatedUnion('type', [
     type: z.literal('snapshot'),
     eventId: z.string(),
     sequence: z.number(),
+    revision: z.number().int().nonnegative(),
     serverTime: z.string().datetime(),
     data: Snapshot,
   }),
@@ -74,6 +77,7 @@ export const ServerEvent = z.discriminatedUnion('type', [
     type: z.literal('playback_changed'),
     eventId: z.string(),
     sequence: z.number(),
+    revision: z.number().int().nonnegative(),
     serverTime: z.string().datetime(),
     data: PlaybackSnapshot,
   }),
@@ -81,6 +85,7 @@ export const ServerEvent = z.discriminatedUnion('type', [
     type: z.literal('participants'),
     eventId: z.string(),
     sequence: z.number(),
+    revision: z.number().int().nonnegative(),
     serverTime: z.string().datetime(),
     data: z.array(Participant),
   }),
@@ -89,6 +94,7 @@ export const ServerEvent = z.discriminatedUnion('type', [
     eventId: z.string(),
     commandId: z.string(),
     sequence: z.number(),
+    revision: z.number().int().nonnegative(),
     serverTime: z.string().datetime(),
     reason: z.string(),
   }),
@@ -96,6 +102,7 @@ export const ServerEvent = z.discriminatedUnion('type', [
     type: z.literal('error'),
     eventId: z.string(),
     sequence: z.number(),
+    revision: z.number().int().nonnegative(),
     serverTime: z.string().datetime(),
     message: z.string(),
   }),
@@ -112,6 +119,9 @@ export type CreateRoomRequest = z.infer<typeof CreateRoomRequest>;
 export const CreateRoomResponse = z.object({
   version: z.literal(CONTRACT_VERSION),
   roomId: z.string().min(1),
+  roomCode: z.string().min(1),
+  token: z.string().min(1),
+  participantId: z.string().min(1),
   role: RoomRole,
   serverTime: z.string().datetime(),
 });

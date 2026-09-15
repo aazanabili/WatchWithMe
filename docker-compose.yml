@@ -46,7 +46,11 @@ services:
       timeout: 3s
       retries: 10
   web:
-    build: { context: ., dockerfile: apps/web/Dockerfile }
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        REALTIME_INTERNAL_URL: http://realtime:4000
     environment:
       HOSTNAME: 0.0.0.0
       NODE_ENV: production

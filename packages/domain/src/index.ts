@@ -92,6 +92,7 @@ function snapshot(state: RoomState, now: string): Snapshot {
     snapshot: state.playback,
     participants: [...state.participants],
     sequence: state.sequence,
+    revision: state.revision,
     serverTime: now,
   };
 }
@@ -108,6 +109,7 @@ function reject(
     eventId: eventId(state, envelope.commandId),
     commandId: envelope.commandId,
     sequence: nextSequence,
+    revision: state.revision,
     serverTime: now,
     reason,
   };
@@ -141,6 +143,7 @@ export function transition(
       type: 'snapshot',
       eventId: eventId(state, envelope.commandId),
       sequence,
+      revision: state.revision,
       serverTime: now,
       data: snapshot({ ...state, sequence }, now),
     };
@@ -160,6 +163,7 @@ export function transition(
       status: 'paused',
       positionSeconds: 0,
       updatedAt: now,
+      revision: state.revision + 1,
     };
   } else if (!playback) return reject(state, envelope, now, 'no_media_loaded');
   else if (command.type === 'play' || command.type === 'pause') {
@@ -177,7 +181,7 @@ export function transition(
   const next: RoomState = {
     ...state,
     lifecycle: 'active',
-    playback,
+    playback: playback ? { ...playback, revision: state.revision + 1 } : playback,
     revision: state.revision + 1,
     sequence,
     commands: new Map(state.commands),
@@ -186,8 +190,9 @@ export function transition(
     type: 'playback_changed',
     eventId: eventId(state, envelope.commandId),
     sequence,
+    revision: next.revision,
     serverTime: now,
-    data: playback,
+    data: next.playback!,
   };
   const result = { state: next, event, accepted: true, duplicate: false };
   next.commands.set(envelope.commandId, result);

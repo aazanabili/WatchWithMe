@@ -18,6 +18,7 @@ type Snap = {
   status: 'playing' | 'paused';
   positionSeconds: number;
   updatedAt: string;
+  revision: number;
 };
 type Person = { id: string; role: 'host' | 'viewer' };
 function youtubeId(value: string) {

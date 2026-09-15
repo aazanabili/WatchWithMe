@@ -2,7 +2,7 @@ import { PrismaClient, type MediaProvider, type ParticipantRole } from '@watch-w
 import type { PlaybackSnapshot } from '@watch-with-me/contracts';
 import type { Room } from './index';
 
-/** Durable adapter. The realtime process owns no authoritative room state in memory. */
+/** Durable adapter. A process-local coordinator serializes commands; PostgreSQL rejects stale saves. */
 export class PrismaRoomRepository {
   constructor(private readonly db: PrismaClient = new PrismaClient()) {}
 
@@ -41,6 +41,7 @@ export class PrismaRoomRepository {
     return {
       code: saved.id,
       sequence: saved.sequence,
+      revision: saved.revision,
       playback: saved.playbackSnapshot ? this.toPlayback(saved.playbackSnapshot) : null,
       participants: new Map(
         saved.participants.map((p) => [
@@ -62,9 +63,13 @@ export class PrismaRoomRepository {
     };
   }
 
-  async save(room: Room) {
-    await this.db.$transaction(async (tx) => {
-      await tx.room.update({ where: { id: room.code }, data: { sequence: room.sequence } });
+  async save(room: Room, expectedSequence = room.sequence): Promise<boolean> {
+    const result = await this.db.$transaction(async (tx) => {
+      const claimed = await tx.room.updateMany({
+        where: { id: room.code, sequence: expectedSequence, revision: { lte: room.revision } },
+        data: { sequence: room.sequence, revision: room.revision },
+      });
+      if (claimed.count !== 1) return false;
       for (const p of room.participants.values())
         await tx.participant.upsert({
           where: { id: p.id },
@@ -94,6 +99,7 @@ export class PrismaRoomRepository {
             positionMs: snapshot.positionMs,
             isPlaying: snapshot.isPlaying,
             capturedAt: snapshot.capturedAt,
+            revision: snapshot.revision,
           },
         });
       }
@@ -110,7 +116,9 @@ export class PrismaRoomRepository {
           },
           update: { responseStatus: sequence },
         });
+      return true;
     });
+    return result;
   }
 
   private toPlayback(value: {
@@ -119,6 +127,7 @@ export class PrismaRoomRepository {
     positionMs: number;
     isPlaying: boolean;
     updatedAt: Date;
+    revision: number;
   }): PlaybackSnapshot {
     return {
       provider: value.provider as 'youtube' | 'mp4',
@@ -126,6 +135,7 @@ export class PrismaRoomRepository {
       status: value.isPlaying ? 'playing' : 'paused',
       positionSeconds: value.positionMs / 1000,
       updatedAt: value.updatedAt.toISOString(),
+      revision: value.revision,
     };
   }
   private fromPlayback(roomId: string, value: PlaybackSnapshot) {
@@ -136,8 +146,9 @@ export class PrismaRoomRepository {
       mediaId: value.videoId,
       positionMs: Math.round(value.positionSeconds * 1000),
       isPlaying: value.status === 'playing',
-      version: 0,
+      version: value.revision,
       capturedAt: new Date(value.updatedAt),
+      revision: value.revision,
     };
   }
 }

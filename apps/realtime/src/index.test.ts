@@ -57,6 +57,7 @@ describe('realtime MVP integration', async () => {
     };
     host.emit('command', command);
     expect(((await changed) as { data: { videoId: string } }).data.videoId).toBe('dQw4w9WgXcQ');
+    expect(((await changed) as { revision: number }).revision).toBe(1);
     const playing = waitForStatus(viewer, 'playing');
     host.emit('command', { version: 'v1', commandId: 'host-play', command: { type: 'play' } });
     expect(((await playing) as { data: { status: string } }).data.status).toBe('playing');
@@ -91,9 +92,11 @@ describe('realtime MVP integration', async () => {
     await waitFor(socket, 'snapshot');
     socket.close();
     const again = connect(address, { auth: { roomCode: created.roomCode, token: created.token } });
-    expect(((await waitFor(again, 'snapshot')) as { data: { roomId: string } }).data.roomId).toBe(
-      created.roomCode,
-    );
+    const finalSnapshot = (await waitFor(again, 'snapshot')) as {
+      data: { roomId: string; revision: number };
+    };
+    expect(finalSnapshot.data.roomId).toBe(created.roomCode);
+    expect(finalSnapshot.data.revision).toBeGreaterThanOrEqual(0);
     again.close();
   });
 });

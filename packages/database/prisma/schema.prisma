@@ -32,6 +32,7 @@ model Room {
   createdAt         DateTime             @default(now())
   updatedAt         DateTime             @updatedAt
   sequence          Int                 @default(0)
+  revision          Int                 @default(0)
   host              Participant?        @relation("RoomHost", fields: [hostParticipantId], references: [id], onDelete: SetNull)
   participants      Participant[]       @relation("RoomParticipants")
   playbackSnapshot  PlaybackSnapshot?
@@ -66,6 +67,7 @@ model PlaybackSnapshot {
   positionMs Int      @default(0)
   isPlaying  Boolean  @default(false)
   version    Int      @default(0)
+  revision   Int      @default(0)
   capturedAt DateTime @default(now())
   updatedAt  DateTime @updatedAt
   room       Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)

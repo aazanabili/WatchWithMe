@@ -33,6 +33,7 @@ describe('room and playback domain', () => {
     expect(played.state.playback?.status).toBe('playing');
     expect(expectedPosition(played.state.playback!, Date.parse(at) + 3500)).toBe(2.5);
     expect(played.state.revision).toBe(2);
+    expect(played.state.playback?.revision).toBe(2);
   });
 
   it('rejects viewer controls but permits state requests', () => {
@@ -63,6 +64,7 @@ describe('room and playback domain', () => {
     );
     expect(duplicate.duplicate).toBe(true);
     expect(duplicate.state.sequence).toBe(1);
+    expect(duplicate.state.revision).toBe(1);
     expect(
       transition(first.state, command('new', { type: 'pause' }), { actorId: 'h', now: at }).event
         .sequence,

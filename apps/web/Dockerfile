@@ -9,12 +9,15 @@ COPY packages/domain/package.json packages/domain/package.json
 RUN npm ci
 
 FROM deps AS build
+ARG REALTIME_INTERNAL_URL=http://realtime:4000
+ENV REALTIME_INTERNAL_URL=$REALTIME_INTERNAL_URL
 COPY . .
 RUN npm run build --workspace @watch-with-me/contracts && npm run build --workspace @watch-with-me/web
 
 FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
+ENV REALTIME_INTERNAL_URL=http://realtime:4000
 RUN addgroup -S app && adduser -S app -G app
 COPY --from=build --chown=app:app /app/apps/web/.next/standalone ./
 COPY --from=build --chown=app:app /app/apps/web/.next/static ./apps/web/.next/static
