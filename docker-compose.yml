@@ -1,0 +1,74 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: watch_with_me
+      POSTGRES_USER: watch_with_me
+      POSTGRES_PASSWORD: watch_with_me_dev
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    networks: [backend]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U watch_with_me -d watch_with_me']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  redis:
+    image: redis:7-alpine
+    networks: [backend]
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  realtime:
+    build: { context: ., dockerfile: apps/realtime/Dockerfile }
+    environment:
+      NODE_ENV: production
+      REALTIME_PORT: 4000
+      DATABASE_URL: postgresql://watch_with_me:watch_with_me_dev@postgres:5432/watch_with_me
+      REDIS_URL: redis://redis:6379
+      REALTIME_ORIGINS: http://localhost:3000
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    networks: [frontend, backend]
+    ports: ['127.0.0.1:4000:4000']
+    command:
+      [
+        'sh',
+        '-c',
+        'node packages/database/node_modules/prisma/build/index.js migrate deploy --schema packages/database/prisma/schema.prisma && node --experimental-specifier-resolution=node apps/realtime/dist/index.js',
+      ]
+    healthcheck:
+      test: ['CMD', 'wget', '--spider', '-q', 'http://localhost:4000/health/live']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        REALTIME_INTERNAL_URL: http://realtime:4000
+    environment:
+      HOSTNAME: 0.0.0.0
+      NODE_ENV: production
+      NEXT_PUBLIC_REALTIME_URL: http://localhost:4000
+      REALTIME_INTERNAL_URL: http://realtime:4000
+    depends_on:
+      realtime: { condition: service_healthy }
+    networks: [frontend]
+    ports: ['3000:3000']
+    healthcheck:
+      test: ['CMD', 'wget', '--spider', '-q', 'http://127.0.0.1:3000/']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+networks:
+  frontend:
+  backend:
+    internal: true
+volumes:
+  postgres_data:
+  redis_data:

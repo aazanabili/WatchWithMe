@@ -1,0 +1,90 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RoomStatus {
+  ACTIVE
+  EXPIRED
+  CLOSED
+}
+
+enum ParticipantRole {
+  HOST
+  GUEST
+}
+
+enum MediaProvider {
+  YOUTUBE
+  VIMEO
+  CUSTOM
+}
+
+model Room {
+  id                String              @id
+  hostParticipantId String?             @unique
+  status            RoomStatus         @default(ACTIVE)
+  expiresAt         DateTime
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  sequence          Int                 @default(0)
+  revision          Int                 @default(0)
+  host              Participant?        @relation("RoomHost", fields: [hostParticipantId], references: [id], onDelete: SetNull)
+  participants      Participant[]       @relation("RoomParticipants")
+  playbackSnapshot  PlaybackSnapshot?
+  idempotencyKeys   IdempotencyKey[]
+
+  @@index([status, expiresAt])
+  @@index([expiresAt])
+}
+
+model Participant {
+  id          String    @id
+  roomId      String
+  displayName String
+  role        ParticipantRole @default(GUEST)
+  joinedAt    DateTime  @default(now())
+  lastSeenAt  DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  tokenHash   String
+  online      Boolean   @default(false)
+  room        Room      @relation("RoomParticipants", fields: [roomId], references: [id], onDelete: Cascade)
+  hostedRoom  Room?     @relation("RoomHost")
+
+  @@unique([roomId, id])
+  @@index([roomId, lastSeenAt])
+}
+
+model PlaybackSnapshot {
+  id         String   @id
+  roomId     String   @unique
+  provider   MediaProvider
+  mediaId    String
+  positionMs Int      @default(0)
+  isPlaying  Boolean  @default(false)
+  version    Int      @default(0)
+  revision   Int      @default(0)
+  capturedAt DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  room       Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@index([roomId, version])
+}
+
+model IdempotencyKey {
+  id             String   @id
+  roomId         String
+  keyHash        String
+  responseStatus Int?
+  responseBody   String?
+  expiresAt      DateTime
+  createdAt      DateTime @default(now())
+  room           Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, keyHash])
+  @@index([expiresAt])
+}
