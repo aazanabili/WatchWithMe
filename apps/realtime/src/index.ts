@@ -325,7 +325,7 @@ io.use(async (socket, next) => {
   next();
 });
 const buckets = new WeakMap<object, { at: number; count: number }>();
-const activeConnections = new Map<string, number>();
+const activeConnections = new Map<string, Set<string>>();
 const roomQueues = new Map<string, Promise<void>>();
 const MAX_CAS_RETRIES = 3;
 const enqueue = (roomCode: string, work: () => Promise<void>) => {
@@ -364,7 +364,9 @@ io.on('connection', (socket) => {
   const room = socket.data.room as Room;
   const participant = socket.data.participant as StoredParticipant;
   socket.join(room.code);
-  activeConnections.set(participant.id, (activeConnections.get(participant.id) ?? 0) + 1);
+  const connections = activeConnections.get(participant.id) ?? new Set<string>();
+  connections.add(socket.id);
+  activeConnections.set(participant.id, connections);
   void enqueue(room.code, async () => {
     const saved = await commit(room.code, (authoritative) => {
       const p = authoritative.participants.get(participant.id);
@@ -516,8 +518,10 @@ io.on('connection', (socket) => {
   );
   socket.on('disconnect', () => {
     void enqueue(room.code, async () => {
-      const remaining = Math.max(0, (activeConnections.get(participant.id) ?? 1) - 1);
-      if (remaining) activeConnections.set(participant.id, remaining);
+      const connections = activeConnections.get(participant.id);
+      connections?.delete(socket.id);
+      const remaining = connections?.size ?? 0;
+      if (remaining) activeConnections.set(participant.id, connections!);
       else activeConnections.delete(participant.id);
       const saved = await commit(room.code, (authoritative) => {
         const p = authoritative.participants.get(participant.id);
