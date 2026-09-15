@@ -327,6 +327,7 @@ io.use(async (socket, next) => {
 const buckets = new WeakMap<object, { at: number; count: number }>();
 const activeConnections = new Map<string, number>();
 const roomQueues = new Map<string, Promise<void>>();
+const MAX_CAS_RETRIES = 3;
 const enqueue = (roomCode: string, work: () => Promise<void>) => {
   const previous = roomQueues.get(roomCode) ?? Promise.resolve();
   const next = previous.catch(() => undefined).then(work);
@@ -338,31 +339,50 @@ const enqueue = (roomCode: string, work: () => Promise<void>) => {
   );
   return next;
 };
-io.on('connection', (socket) => {
-  const room = socket.data.room as Room;
-  const participant = socket.data.participant as StoredParticipant;
-  socket.join(room.code);
-  activeConnections.set(participant.id, (activeConnections.get(participant.id) ?? 0) + 1);
-  participant.online = true;
-  const connectionSequence = room.sequence;
-  room.sequence++;
-  void rooms.save(room, connectionSequence);
+const commit = async (roomCode: string, mutate: (room: Room) => void) => {
+  for (let attempt = 0; attempt < MAX_CAS_RETRIES; attempt++) {
+    const authoritative = await rooms.get(roomCode);
+    if (!authoritative) return undefined;
+    const expected = authoritative.sequence;
+    mutate(authoritative);
+    if (await rooms.save(authoritative, expected)) return authoritative;
+  }
+  return null;
+};
+const participantData = (room: Room) =>
+  [...room.participants.values()].map(({ id, role }) => ({ id, role }));
+const broadcastParticipants = (room: Room) =>
   io.to(room.code).emit('participants', {
     type: 'participants',
     eventId: randomUUID(),
     sequence: room.sequence,
     revision: room.revision,
     serverTime: now(),
-    data: [...room.participants.values()].map(({ id, role }) => ({ id, role })),
+    data: participantData(room),
   });
-  socket.emit('ready', { version: CONTRACT_VERSION });
-  socket.emit('snapshot', {
-    type: 'snapshot',
-    eventId: randomUUID(),
-    sequence: room.sequence,
-    revision: room.revision,
-    serverTime: now(),
-    data: rooms.snapshot(room),
+io.on('connection', (socket) => {
+  const room = socket.data.room as Room;
+  const participant = socket.data.participant as StoredParticipant;
+  socket.join(room.code);
+  activeConnections.set(participant.id, (activeConnections.get(participant.id) ?? 0) + 1);
+  void enqueue(room.code, async () => {
+    const saved = await commit(room.code, (authoritative) => {
+      const p = authoritative.participants.get(participant.id);
+      if (!p) return;
+      p.online = true;
+      authoritative.sequence++;
+    });
+    if (!saved || saved === null) return emitError(socket, 'state_conflict');
+    broadcastParticipants(saved);
+    socket.emit('ready', { version: CONTRACT_VERSION });
+    socket.emit('snapshot', {
+      type: 'snapshot',
+      eventId: randomUUID(),
+      sequence: saved.sequence,
+      revision: saved.revision,
+      serverTime: now(),
+      data: rooms.snapshot(saved),
+    });
   });
   const handle = async (raw: unknown) =>
     enqueue(room.code, async (): Promise<void> => {
@@ -495,22 +515,18 @@ io.on('connection', (socket) => {
     }),
   );
   socket.on('disconnect', () => {
-    const remaining = Math.max(0, (activeConnections.get(participant.id) ?? 1) - 1);
-    if (remaining) activeConnections.set(participant.id, remaining);
-    else {
-      activeConnections.delete(participant.id);
-      participant.online = false;
-    }
-    const disconnectSequence = room.sequence;
-    room.sequence++;
-    void rooms.save(room, disconnectSequence);
-    io.to(room.code).emit('participants', {
-      type: 'participants',
-      eventId: randomUUID(),
-      sequence: room.sequence,
-      revision: room.revision,
-      serverTime: now(),
-      data: [...room.participants.values()].map(({ id, role }) => ({ id, role })),
+    void enqueue(room.code, async () => {
+      const remaining = Math.max(0, (activeConnections.get(participant.id) ?? 1) - 1);
+      if (remaining) activeConnections.set(participant.id, remaining);
+      else activeConnections.delete(participant.id);
+      const saved = await commit(room.code, (authoritative) => {
+        const p = authoritative.participants.get(participant.id);
+        if (!p) return;
+        // A delayed disconnect from tab A must not mark tab B offline.
+        p.online = remaining > 0;
+        authoritative.sequence++;
+      });
+      if (saved && saved !== null) broadcastParticipants(saved);
     });
   });
 });

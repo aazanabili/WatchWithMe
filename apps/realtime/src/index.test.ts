@@ -1,6 +1,6 @@
 import { describe, expect, it, afterAll } from 'vitest';
 import { io as connect, type Socket } from 'socket.io-client';
-import { httpServer, io } from './index';
+import { httpServer, io, rooms } from './index';
 
 let address: string;
 const listen = new Promise<void>((resolve) =>
@@ -98,5 +98,45 @@ describe('realtime MVP integration', async () => {
     expect(finalSnapshot.data.roomId).toBe(created.roomCode);
     expect(finalSnapshot.data.revision).toBeGreaterThanOrEqual(0);
     again.close();
+  });
+
+  it('serializes concurrent host tabs and preserves online state across stale disconnects', async () => {
+    const created = await fetch(`${address}/api/rooms`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'Multi-tab host' }),
+    }).then((r) => r.json());
+    const first = connect(address, { auth: { roomCode: created.roomCode, token: created.token } });
+    const second = connect(address, { auth: { roomCode: created.roomCode, token: created.token } });
+    await Promise.all([waitFor(first, 'snapshot'), waitFor(second, 'snapshot')]);
+    const firstState = await rooms.get(created.roomCode);
+    expect(firstState?.sequence).toBe(2); // two connects are state-changing lifecycle events
+    expect([...firstState!.participants.values()][0].online).toBe(true);
+
+    const loaded = waitFor(first, 'playback_changed');
+    first.emit('command', {
+      version: 'v1',
+      commandId: 'multi-load',
+      command: { type: 'load', provider: 'youtube', videoId: 'dQw4w9WgXcQ' },
+    });
+    await loaded;
+    const playing = waitFor(first, 'playback_changed');
+    second.emit('command', { version: 'v1', commandId: 'multi-play', command: { type: 'play' } });
+    await playing;
+    const paused = waitFor(first, 'playback_changed');
+    first.emit('command', { version: 'v1', commandId: 'multi-pause', command: { type: 'pause' } });
+    await paused;
+    const afterCommands = await rooms.get(created.roomCode);
+    expect(afterCommands?.sequence).toBe(5); // 2 connects + 3 commands
+
+    const stillOnline = waitFor(second, 'participants');
+    first.close();
+    await stillOnline;
+    expect([...(await rooms.get(created.roomCode))!.participants.values()][0].online).toBe(true);
+    second.close();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const final = await rooms.get(created.roomCode);
+    expect([...final!.participants.values()][0].online).toBe(false);
+    expect(final?.sequence).toBe(7);
   });
 });
