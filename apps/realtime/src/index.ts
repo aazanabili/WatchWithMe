@@ -24,13 +24,14 @@ export type Room = {
   code: string;
   participants: Map<string, StoredParticipant>;
   playback: PlaybackSnapshot | null;
+  revision: number;
   sequence: number;
   commands: Map<string, number>;
 };
 export interface RoomRepository {
   create(room: Room): Promise<void>;
   get(code: string): Promise<Room | undefined>;
-  save(room: Room): Promise<void>;
+  save(room: Room, expectedSequence?: number): Promise<boolean>;
 }
 export class InMemoryRoomRepository implements RoomRepository {
   private readonly rooms = new Map<string, Room>();
@@ -40,8 +41,9 @@ export class InMemoryRoomRepository implements RoomRepository {
   async get(code: string) {
     return this.rooms.get(code);
   }
-  async save(room: Room) {
+  async save(room: Room): Promise<boolean> {
     this.rooms.set(room.code, room);
+    return true;
   }
 }
 
@@ -126,8 +128,8 @@ export class RoomService {
       ? new InMemoryRoomRepository()
       : new PrismaRoomRepository(),
   ) {}
-  async save(room: Room) {
-    await this.repo.save(room);
+  async save(room: Room, expectedSequence?: number) {
+    return this.repo.save(room, expectedSequence);
   }
   async get(codeValue: string) {
     return this.repo.get(codeValue.toUpperCase());
@@ -148,6 +150,7 @@ export class RoomService {
       playback: null,
       sequence: 0,
       commands: new Map(),
+      revision: 0,
     };
     await this.repo.create(room);
     return { room, token, participantId: p.id };
@@ -181,6 +184,7 @@ export class RoomService {
       snapshot: room.playback,
       participants: [...room.participants.values()].map(({ id, role }) => ({ id, role })),
       sequence: room.sequence,
+      revision: room.revision,
       serverTime: now(),
     };
   }
@@ -305,6 +309,7 @@ const emitError = (
     eventId: randomUUID(),
     ...(commandId ? { commandId } : {}),
     sequence: 0,
+    revision: 0,
     serverTime: now(),
     message,
   });
@@ -339,12 +344,14 @@ io.on('connection', (socket) => {
   socket.join(room.code);
   activeConnections.set(participant.id, (activeConnections.get(participant.id) ?? 0) + 1);
   participant.online = true;
+  const connectionSequence = room.sequence;
   room.sequence++;
-  void rooms.save(room);
+  void rooms.save(room, connectionSequence);
   io.to(room.code).emit('participants', {
     type: 'participants',
     eventId: randomUUID(),
     sequence: room.sequence,
+    revision: room.revision,
     serverTime: now(),
     data: [...room.participants.values()].map(({ id, role }) => ({ id, role })),
   });
@@ -353,6 +360,7 @@ io.on('connection', (socket) => {
     type: 'snapshot',
     eventId: randomUUID(),
     sequence: room.sequence,
+    revision: room.revision,
     serverTime: now(),
     data: rooms.snapshot(room),
   });
@@ -360,7 +368,13 @@ io.on('connection', (socket) => {
     enqueue(room.code, async (): Promise<void> => {
       const envelope = CommandEnvelope.safeParse(raw);
       if (!envelope.success) return emitError(socket, 'invalid_command');
+      const fresh = await rooms.get(room.code);
+      if (!fresh) return emitError(socket, 'room_not_found');
+      Object.assign(room, fresh);
+      const currentParticipant = room.participants.get(participant.id);
+      if (!currentParticipant) return emitError(socket, 'unauthorized');
       const { commandId, command } = envelope.data;
+      const expectedSequence = room.sequence;
       const bucket = buckets.get(socket) ?? { at: Date.now(), count: 0 };
       if (Date.now() - bucket.at > 1000) {
         bucket.at = Date.now();
@@ -373,17 +387,19 @@ io.on('connection', (socket) => {
           type: 'snapshot',
           eventId: randomUUID(),
           sequence: room.sequence,
+          revision: room.revision,
           serverTime: now(),
           data: rooms.snapshot(room),
         });
         return;
       }
-      if (command.type !== 'request_state' && participant.role !== 'host') {
+      if (command.type !== 'request_state' && currentParticipant.role !== 'host') {
         socket.emit('command_rejected', {
           type: 'command_rejected',
           eventId: randomUUID(),
           commandId,
           sequence: room.sequence,
+          revision: room.revision,
           serverTime: now(),
           reason: 'host_only',
         });
@@ -395,6 +411,7 @@ io.on('connection', (socket) => {
           type: 'snapshot',
           eventId: randomUUID(),
           sequence: room.sequence,
+          revision: room.revision,
           serverTime: now(),
           data: rooms.snapshot(room),
         });
@@ -407,6 +424,7 @@ io.on('connection', (socket) => {
           eventId: randomUUID(),
           commandId,
           sequence: room.sequence,
+          revision: room.revision,
           serverTime: now(),
           reason: 'invalid_media',
         });
@@ -419,6 +437,7 @@ io.on('connection', (socket) => {
           status: 'paused',
           positionSeconds: 0,
           updatedAt: now(),
+          revision: room.revision + 1,
         };
       } else if (room.playback) {
         const playback: PlaybackSnapshot = {
@@ -427,6 +446,7 @@ io.on('connection', (socket) => {
           status: room.playback.status,
           positionSeconds: room.playback.positionSeconds,
           updatedAt: now(),
+          revision: room.revision + 1,
         };
         if (command.type === 'play') playback.status = 'playing';
         else if (command.type === 'pause') playback.status = 'paused';
@@ -443,11 +463,25 @@ io.on('connection', (socket) => {
         if (oldest) room.commands.delete(oldest);
       }
       room.sequence++;
-      await rooms.save(room);
+      room.revision++;
+      if (room.playback) room.playback.revision = room.revision;
+      if (!(await rooms.save(room, expectedSequence))) {
+        socket.emit('command_rejected', {
+          type: 'command_rejected',
+          eventId: randomUUID(),
+          commandId,
+          sequence: room.sequence,
+          revision: room.revision,
+          serverTime: now(),
+          reason: 'stale_state',
+        });
+        return;
+      }
       io.to(room.code).emit('playback_changed', {
         type: 'playback_changed',
         eventId: randomUUID(),
         sequence: room.sequence,
+        revision: room.revision,
         serverTime: now(),
         data: room.playback,
       });
@@ -467,12 +501,14 @@ io.on('connection', (socket) => {
       activeConnections.delete(participant.id);
       participant.online = false;
     }
+    const disconnectSequence = room.sequence;
     room.sequence++;
-    void rooms.save(room);
+    void rooms.save(room, disconnectSequence);
     io.to(room.code).emit('participants', {
       type: 'participants',
       eventId: randomUUID(),
       sequence: room.sequence,
+      revision: room.revision,
       serverTime: now(),
       data: [...room.participants.values()].map(({ id, role }) => ({ id, role })),
     });
