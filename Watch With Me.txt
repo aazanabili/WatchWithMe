@@ -1,0 +1,11 @@
+Watch With Me 🎬
+A real-time video synchronization platform that allows multiple users to watch videos together with perfect synchronization. Watch YouTube, Vimeo, Facebook, Dailymotion, or your own video files simultaneously with friends, no matter where they are!
+
+✨ Features
+🎥 Multi-Platform Support: YouTube, Vimeo, Facebook, Dailymotion, Twitch, Google Drive, Dropbox, and direct MP4 files
+🔄 Real-Time Sync: Perfect synchronization of play, pause, and seek actions across all viewers
+👑 Host/Viewer Model: One host controls the playback, all viewers stay in sync
+💾 State Persistence: Automatic state saving and restoration even after disconnections
+🎯 Room-Based: Multiple isolated rooms for different watch parties
+📱 Responsive Design: Works seamlessly on desktop and mobile devices
+🐳 Docker Ready: Easy deployment with Docker Compose
