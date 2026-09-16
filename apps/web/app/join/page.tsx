@@ -1,8 +1,13 @@
 'use client';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
+import { saveRoomCredential } from '../../components/room-credential';
+
 const API = process.env.NEXT_PUBLIC_API_URL || '/api';
+
 export default function JoinPage() {
+  const router = useRouter();
   const [roomId, setRoomId] = useState('');
   const [name, setName] = useState('');
   const [error, setError] = useState('');
@@ -29,8 +34,7 @@ export default function JoinPage() {
       });
       if (!r.ok) throw Error();
       const d = await r.json();
-      sessionStorage.setItem(`watch-with-me:${d.roomId}`, JSON.stringify({ token: d.token }));
-      location.href = `/room/${encodeURIComponent(id)}`;
+      router.push(saveRoomCredential(d, sessionStorage));
     } catch {
       setError('لم نجد هذه الغرفة. تحقق من الرابط.');
       setBusy(false);
