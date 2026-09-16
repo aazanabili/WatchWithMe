@@ -287,10 +287,10 @@ const bearer = (req: Request) => {
 app.get('/health/live', (_req, res) => res.json({ status: 'ok' }));
 app.get('/health/ready', (_req, res) => res.json({ status: 'ok' }));
 app.get('/api/rooms/:code/state', async (req: Request, res: Response) => {
-  const room = await rooms.get(String(req.params.code));
-  if (!room || !(await rooms.authenticate(String(req.params.code), bearer(req))))
-    return fail(res, 404, 'not_found');
-  return res.json(rooms.snapshot(room));
+  // Do not reveal whether an arbitrary room code exists to unauthenticated callers.
+  const auth = await rooms.authenticate(String(req.params.code), bearer(req));
+  if (!auth) return fail(res, 401, 'unauthorized');
+  return res.json(rooms.snapshot(auth.room));
 });
 app.post('/api/rooms', async (req: Request, res: Response) => {
   const parsed = CreateRoomRequest.safeParse(req.body);
@@ -375,12 +375,16 @@ const roomQueues = new Map<string, Promise<void>>();
 function enqueue(roomCode: string, work: () => Promise<void>) {
   const previous = roomQueues.get(roomCode) ?? Promise.resolve();
   const next = previous.catch(() => undefined).then(work);
-  roomQueues.set(
-    roomCode,
-    next.finally(() => {
-      if (roomQueues.get(roomCode) === next) roomQueues.delete(roomCode);
-    }),
+  // Cleanup must resolve independently so a rejected work promise remains observable.
+  const cleanup = next.then(
+    () => {
+      if (roomQueues.get(roomCode) === cleanup) roomQueues.delete(roomCode);
+    },
+    () => {
+      if (roomQueues.get(roomCode) === cleanup) roomQueues.delete(roomCode);
+    },
   );
+  roomQueues.set(roomCode, cleanup);
   return next;
 }
 const commit = async (roomCode: string, mutate: (room: Room) => void) => {
@@ -428,6 +432,11 @@ io.on('connection', (socket) => {
       revision: saved.revision,
       serverTime: now(),
       data: rooms.snapshot(saved),
+    });
+  }).catch((error: unknown) => {
+    log('room_queue_error', {
+      roomCode: room.code,
+      error: error instanceof Error ? error.message : 'unknown',
     });
   });
   const handle = async (raw: unknown) =>
@@ -598,6 +607,11 @@ io.on('connection', (socket) => {
         authoritative.sequence++;
       });
       if (saved && saved !== null) broadcastParticipants(saved);
+    }).catch((error: unknown) => {
+      log('room_queue_error', {
+        roomCode: room.code,
+        error: error instanceof Error ? error.message : 'unknown',
+      });
     });
   });
 });

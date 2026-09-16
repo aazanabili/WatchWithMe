@@ -1,12 +1,21 @@
 'use client';
 import Link from 'next/link';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 const API = process.env.NEXT_PUBLIC_API_URL || '/api';
 export default function JoinPage() {
   const [roomId, setRoomId] = useState('');
   const [name, setName] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [fromInvite, setFromInvite] = useState(false);
+  useEffect(() => {
+    const value = new URLSearchParams(window.location.search).get('room')?.trim() || '';
+    if (value) {
+      setRoomId(value);
+      setFromInvite(true);
+      document.getElementById('name')?.focus();
+    }
+  }, []);
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!roomId.trim() || !name.trim()) return setError('أكمل رمز الغرفة واسمك.');
@@ -47,9 +56,16 @@ export default function JoinPage() {
           className="input"
           value={roomId}
           onChange={(e) => setRoomId(e.target.value)}
+          readOnly={fromInvite}
+          aria-describedby={fromInvite ? 'invite-note' : undefined}
           placeholder="مثلاً: moon-7k2"
           autoCapitalize="none"
         />
+        {fromInvite && (
+          <p id="invite-note" className="live-note">
+            رمز الغرفة مأخوذ من رابط الدعوة.
+          </p>
+        )}
         <label className="label" htmlFor="name">
           اسمك
         </label>
@@ -58,11 +74,12 @@ export default function JoinPage() {
           className="input"
           value={name}
           onChange={(e) => setName(e.target.value)}
+          autoFocus={fromInvite}
           placeholder="مثلاً: سامر"
           maxLength={80}
         />
         {error && (
-          <p className="error" aria-live="polite">
+          <p className="error" role="alert" aria-live="assertive">
             {error}
           </p>
         )}
