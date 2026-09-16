@@ -26,6 +26,8 @@ export const Snapshot = z
     roomId: z.string().min(1),
     snapshot: PlaybackSnapshot.nullable(),
     participants: z.array(Participant),
+    // Domain-only snapshots may omit transport identity; authenticated HTTP/socket snapshots include it.
+    currentParticipant: Participant.optional(),
     sequence: z.number().int().nonnegative(),
     revision: z.number().int().nonnegative(),
     serverTime: z.string().datetime(),

@@ -1,6 +1,7 @@
 'use client';
 import dynamic from 'next/dynamic';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import type { Socket } from 'socket.io-client';
 import type { PlayerAdapter } from './player-adapter';
 import { expectedPosition } from './player-adapter';
@@ -12,6 +13,7 @@ const SOCKET =
     ? `${window.location.protocol}//${window.location.hostname}:4000`
     : API);
 const YouTubePlayer = dynamic(() => import('./youtube-player'), { ssr: false });
+type Person = { id: string; role: 'host' | 'viewer' };
 type Snap = {
   provider: 'youtube' | 'mp4';
   videoId: string;
@@ -20,72 +22,111 @@ type Snap = {
   updatedAt: string;
   revision: number;
 };
-type Person = { id: string; role: 'host' | 'viewer' };
-function youtubeId(value: string) {
-  const match = value.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/))([^?&/]+)/);
-  return match?.[1] || (value.length === 11 ? value : '');
+declare global {
+  interface Error {
+    data?: { code?: string };
+  }
 }
 export default function RoomClient({ roomId }: { roomId: string }) {
   const [snap, setSnap] = useState<Snap | null>(null);
   const [people, setPeople] = useState<Person[]>([]);
-  const [connected, setConnected] = useState(false);
+  const [connection, setConnection] = useState('connecting');
   const [error, setError] = useState('');
-  const [copied, setCopied] = useState(false);
+  const [feedback, setFeedback] = useState('');
   const [ready, setReady] = useState(false);
   const [provider, setProvider] = useState<'youtube' | 'mp4'>('youtube');
   const [source, setSource] = useState('');
-  const adapter = useRef<PlayerAdapter | null>(null);
+  const [credential, setCredential] = useState<{ token?: string } | null>(null);
+  const [currentParticipant, setCurrentParticipant] = useState<Person | null>(null);
+  const [checked, setChecked] = useState(false);
   const socket = useRef<Socket | null>(null);
-  const [credential, setCredential] = useState<{ token?: string; role?: Person['role'] } | null>(
-    null,
-  );
-  const send = useCallback(
-    (command: object) =>
-      socket.current?.emit('command', { version: 'v1', commandId: crypto.randomUUID(), command }),
-    [],
-  );
+  const adapter = useRef<PlayerAdapter | null>(null);
+  const redirecting = useRef(false);
+  const router = useRouter();
+  const send = useCallback((command: object) => {
+    if (socket.current?.connected)
+      socket.current.emit('command', { version: 'v1', commandId: crypto.randomUUID(), command });
+  }, []);
   useEffect(() => {
     let alive = true;
-    let saved: { token?: string; role?: Person['role'] } | null = null;
+    let saved: { token?: string } | null = null;
     try {
       saved = JSON.parse(sessionStorage.getItem(`watch-with-me:${roomId}`) || 'null');
     } catch {
       saved = null;
     }
     setCredential(saved);
+    setChecked(true);
+    const redirect = () => {
+      if (redirecting.current) return;
+      redirecting.current = true;
+      sessionStorage.removeItem(`watch-with-me:${roomId}`);
+      router.replace(`/join?room=${encodeURIComponent(roomId)}`);
+    };
+    if (!saved?.token) {
+      redirect();
+      return () => {
+        alive = false;
+      };
+    }
     fetch(`${API}/rooms/${encodeURIComponent(roomId)}/state`, {
-      headers: saved?.token ? { Authorization: `Bearer ${saved.token}` } : {},
+      headers: { Authorization: `Bearer ${saved.token}` },
     })
-      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((r) => {
+        if ([401, 403, 404].includes(r.status)) {
+          redirect();
+          throw Error('redirected');
+        }
+        return r.ok ? r.json() : Promise.reject(Error('network'));
+      })
       .then(async (d) => {
         if (!alive) return;
         setSnap(d.snapshot);
         setPeople(d.participants || []);
-        const { io: connect } = await import('socket.io-client');
+        setCurrentParticipant(d.currentParticipant);
+        const { io } = await import('socket.io-client');
         if (!alive) return;
-        const s = connect(SOCKET, { auth: { roomCode: roomId, token: saved?.token } });
+        const s = io(SOCKET, { auth: { roomCode: roomId, token: saved?.token } });
         socket.current = s;
-        s.on('connect', () => setConnected(true))
-          .on('disconnect', () => setConnected(false))
+        s.io.on('reconnect_attempt', () => setConnection('reconnecting'));
+        s.on('connect', () => {
+          setConnection('connected');
+          s.emit('command', {
+            version: 'v1',
+            commandId: crypto.randomUUID(),
+            command: { type: 'request_state' },
+          });
+        })
+          .on('disconnect', () => setConnection('disconnected'))
           .on('snapshot', (e) => {
             const x = e.data || e;
             setSnap(x.snapshot || x);
-            setPeople(x.participants || []);
+            if (Array.isArray(x.participants)) setPeople(x.participants);
+            if (x.currentParticipant) setCurrentParticipant(x.currentParticipant);
           })
           .on('playback_changed', (e) => setSnap(e.data || e))
-          .on('participants', (e) => setPeople(e.data || []))
-          .on('command_rejected', (e) => setError(`لم يُنفذ الأمر: ${e.reason || 'رفض الخادم'}`))
-          .on('connect_error', () => setError('الاتصال بالغرفة غير متاح حالياً.'));
+          .on('participants', (e) => {
+            if (Array.isArray(e.data)) setPeople(e.data);
+          })
+          .on('unauthorized', redirect)
+          .on('connect_error', (e) => {
+            if (/unauthorized/i.test(e.message) || e.data?.code === 'UNAUTHORIZED') redirect();
+            else {
+              setConnection('disconnected');
+              setError('تعذر الاتصال بالغرفة. سنحاول إعادة الاتصال.');
+            }
+          });
       })
-      .catch(() => {
-        if (alive) setError('تعذر تحميل الغرفة. تحقق من الرابط.');
+      .catch((e) => {
+        if (alive && e.message !== 'redirected') setError('تعذر تحميل حالة الغرفة.');
       });
     return () => {
       alive = false;
+      socket.current?.removeAllListeners();
       socket.current?.disconnect();
       adapter.current?.destroy();
     };
-  }, [roomId]);
+  }, [roomId, router]);
   useEffect(() => {
     if (!snap || !adapter.current) return;
     const target = expectedPosition(snap.positionSeconds, snap.updatedAt, snap.status);
@@ -94,35 +135,62 @@ export default function RoomClient({ roomId }: { roomId: string }) {
     else void adapter.current.pause();
   }, [snap]);
   function load() {
-    const id = provider === 'youtube' ? youtubeId(source.trim()) : source.trim();
-    if (!id || (provider === 'mp4' && !/^https:\/\//i.test(id)))
-      return setError('أدخل رابط MP4 يبدأ بـ https://.');
+    const match = source
+      .trim()
+      .match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/))([^?&/]+)/);
+    const id = provider === 'youtube' ? match?.[1] || source.trim() : source.trim();
+    if (!id || (provider === 'mp4' && !/^https:\/\//i.test(id))) {
+      setError('أدخل رابط مصدر صالحاً.');
+      return;
+    }
     setError('');
     setReady(false);
     send({ type: 'load', provider, videoId: id });
   }
-  function share() {
-    void navigator.clipboard?.writeText(location.href).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1800);
-    });
+  async function share() {
+    const url = `${location.origin}/join?room=${encodeURIComponent(roomId)}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      setFeedback('تم نسخ رابط الدعوة');
+    } catch {
+      setFeedback('تعذر النسخ — انسخ الرابط من شريط العنوان.');
+    }
   }
-  const isHost = credential?.role === 'host';
+  const isHost = currentParticipant?.role === 'host';
   const position = snap ? expectedPosition(snap.positionSeconds, snap.updatedAt, snap.status) : 0;
+  if (!checked)
+    return (
+      <main className="room-shell">
+        <p role="status" aria-live="polite">
+          جاري التحقق من الدعوة…
+        </p>
+      </main>
+    );
+  if (!credential) return null;
   return (
     <main className="room-shell">
       <header className="room-nav">
         <a className="wordmark" href="/">
           WATCH <i>WITH</i> ME
         </a>
-        <span className="status">
-          <i className="dot" /> {connected ? 'متصل ومتزامن' : 'جاري الاتصال…'}
+        <span className="status" role="status" aria-live="polite">
+          <i className="dot" />{' '}
+          {connection === 'connected'
+            ? 'متصل ومتزامن'
+            : connection === 'reconnecting'
+              ? 'يعاد الاتصال…'
+              : connection === 'disconnected'
+                ? 'غير متصل'
+                : 'جاري الاتصال…'}
         </span>
         <span className="kicker">ROOM / {roomId}</span>
       </header>
       <div className="room-grid">
         <section>
-          <div className="stage">
+          <div
+            className="stage"
+            data-testid={snap?.provider === 'mp4' ? 'video-player' : undefined}
+          >
             {snap?.provider === 'mp4' ? (
               <video
                 ref={(node) => {
@@ -133,10 +201,8 @@ export default function RoomClient({ roomId }: { roomId: string }) {
                     });
                 }}
                 src={snap.videoId}
-                controls={isHost}
                 playsInline
                 aria-label="مشغل الفيديو"
-                data-testid="video-player"
               />
             ) : snap?.provider === 'youtube' ? (
               <YouTubePlayer
@@ -158,7 +224,6 @@ export default function RoomClient({ roomId }: { roomId: string }) {
               <label htmlFor="provider">مصدر الفيديو</label>
               <select
                 id="provider"
-                className="input"
                 value={provider}
                 onChange={(e) => setProvider(e.target.value as 'youtube' | 'mp4')}
               >
@@ -166,25 +231,19 @@ export default function RoomClient({ roomId }: { roomId: string }) {
                 <option value="mp4">MP4 مباشر</option>
               </select>
               <input
-                className="input"
                 value={source}
                 onChange={(e) => setSource(e.target.value)}
-                placeholder="https://…/movie.mp4"
                 aria-label="رابط مصدر الفيديو"
+                placeholder="https://…/movie.mp4"
               />
-              <button className="button button-primary" onClick={load} disabled={!connected}>
+              <button onClick={load} disabled={connection !== 'connected'}>
                 Load
               </button>
             </div>
           )}
           {isHost && (
             <div className="controls">
-              <button
-                className="primary"
-                onClick={() => send({ type: 'play' })}
-                disabled={!ready}
-                aria-label="تشغيل"
-              >
+              <button onClick={() => send({ type: 'play' })} disabled={!ready} aria-label="تشغيل">
                 ▶
               </button>
               <button onClick={() => send({ type: 'pause' })} disabled={!ready} aria-label="إيقاف">
@@ -200,29 +259,24 @@ export default function RoomClient({ roomId }: { roomId: string }) {
               />
             </div>
           )}
-          {error && (
-            <p className="error" aria-live="polite">
-              {error}
+          {(error || feedback) && (
+            <p role="status" aria-live="polite">
+              {error || feedback}
             </p>
           )}
         </section>
         <aside className="room-side">
           <p className="kicker">الحاضرون / {people.length}</p>
-          <h2>من في الغرفة؟</h2>
           <ul className="participants" aria-live="polite">
-            {people.length ? (
-              people.map((p, i) => (
-                <li key={p.id}>
-                  {i === 0 ? 'المضيف' : 'مشاهد'} <span className="role">{p.role}</span>
-                </li>
-              ))
-            ) : (
-              <li>بانتظار أول ضيف…</li>
-            )}
+            {people.map((p, i) => (
+              <li key={p.id}>
+                {i === 0 ? 'المضيف' : 'مشاهد'}{' '}
+                <span className="role">{p.role === 'host' ? 'مضيف' : 'مشاهد'}</span>
+              </li>
+            ))}
           </ul>
-          {isHost && <p className="live-note">أنت المضيف — اختر فيديو من أدوات الغرفة.</p>}
           <button className="share" onClick={share}>
-            {copied ? 'تم نسخ الرابط ✓' : 'انسخ رابط الغرفة'}
+            انسخ رابط الدعوة
           </button>
         </aside>
       </div>

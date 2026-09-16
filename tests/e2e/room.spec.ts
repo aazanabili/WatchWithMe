@@ -28,6 +28,7 @@ test('creates a room, joins a second client, and keeps viewer controls read-only
   await expect(viewer.locator('.participants')).toContainText('مشاهد');
   await expect(viewer.getByRole('button', { name: 'تشغيل' })).toHaveCount(0);
   await expect(viewer.getByTestId('video-player')).toHaveCount(0);
+  await expect(host.getByText('متصل ومتزامن')).toBeVisible();
   await host.selectOption('#provider', 'mp4');
   await host.getByLabel('رابط مصدر الفيديو').fill('https://fixtures.example.test/watch.mp4');
   await host.getByRole('button', { name: 'Load' }).click();
