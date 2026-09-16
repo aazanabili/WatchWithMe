@@ -1,8 +1,11 @@
 'use client';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useState } from 'react';
+import { saveRoomCredential } from './room-credential';
 const API = process.env.NEXT_PUBLIC_API_URL || '/api';
 export default function CreateForm() {
+  const router = useRouter();
   const [name, setName] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -18,7 +21,7 @@ export default function CreateForm() {
       });
       if (!r.ok) throw Error();
       const d = await r.json();
-      location.href = `/room/${encodeURIComponent(d.roomId)}`;
+      router.push(saveRoomCredential(d, sessionStorage));
     } catch {
       setError('تعذر إنشاء الغرفة الآن. حاول مجدداً.');
       setBusy(false);
