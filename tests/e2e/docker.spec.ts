@@ -72,10 +72,16 @@ test('Docker E2E: independent host/viewer YouTube synchronization', async ({
 
     await expect
       .poll(async () => (await snapshot(host, roomId)).snapshot, { timeout: 30_000 })
-      .toMatchObject({ provider: 'youtube', videoId: VIDEO_ID });
+      .toMatchObject(
+        { provider: 'youtube', videoId: VIDEO_ID },
+        'Host app state must expose the lowercase YouTube contract and requested video ID',
+      );
     await expect
       .poll(async () => (await snapshot(viewer, roomId)).snapshot, { timeout: 30_000 })
-      .toMatchObject({ provider: 'youtube', videoId: VIDEO_ID });
+      .toMatchObject(
+        { provider: 'youtube', videoId: VIDEO_ID },
+        'Viewer app state must receive the lowercase YouTube contract and requested video ID',
+      );
 
     const iframe = host.locator(`iframe[src*="${VIDEO_ID}"]`);
     const viewerIframe = viewer.locator(`iframe[src*="${VIDEO_ID}"]`);
@@ -88,24 +94,41 @@ test('Docker E2E: independent host/viewer YouTube synchronization', async ({
         body: message,
         contentType: 'text/plain',
       });
-      test.skip(true, message);
+      throw new Error(message);
     }
-    await expect(iframe).toBeVisible({ timeout: 30_000 });
-    await expect(viewerIframe).toBeVisible({ timeout: 30_000 });
+    await expect(iframe, 'Host YouTube iframe must be visible for the requested video').toBeVisible(
+      {
+        timeout: 30_000,
+      },
+    );
+    await expect(
+      viewerIframe,
+      'Viewer YouTube iframe must be visible for the requested video',
+    ).toBeVisible({ timeout: 30_000 });
 
     // Exercise real controls. The server snapshot is the synchronization contract;
     // the viewer must observe each command, even when browser autoplay is blocked.
-    await expect(host.getByRole('button', { name: 'تشغيل' })).toBeEnabled({
-      timeout: 30_000,
-    });
+    await expect(
+      host.getByRole('button', { name: 'تشغيل' }),
+      'YouTube API must report ready before Play is attempted',
+    ).toBeEnabled({ timeout: 30_000 });
     await host.getByRole('button', { name: 'تشغيل' }).click();
-    await expect.poll(async () => (await snapshot(viewer, roomId)).snapshot.status).toBe('playing');
+    await expect
+      .poll(async () => (await snapshot(viewer, roomId)).snapshot.status, {
+        message: 'Viewer must observe YouTube Play state',
+      })
+      .toBe('playing');
     await host.getByRole('button', { name: 'إيقاف' }).click();
-    await expect.poll(async () => (await snapshot(viewer, roomId)).snapshot.status).toBe('paused');
+    await expect
+      .poll(async () => (await snapshot(viewer, roomId)).snapshot.status, {
+        message: 'Viewer must observe YouTube Pause state',
+      })
+      .toBe('paused');
     await host.getByLabel('التقديم في الفيديو').fill('7');
     await expect
       .poll(async () => (await snapshot(viewer, roomId)).snapshot.positionSeconds, {
         timeout: 15_000,
+        message: 'Viewer must observe the requested YouTube Seek position',
       })
       .toBe(7);
   } finally {
