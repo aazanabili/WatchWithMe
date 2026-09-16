@@ -278,6 +278,58 @@ describe('realtime MVP integration', async () => {
     expect(state.participants).toHaveLength(4);
   });
 
+  it('returns authenticated self identity only, including after reconnect', async () => {
+    const host = await fetch(`${address}/api/rooms`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'identity host' }),
+    }).then((r) => r.json());
+    const viewer = await fetch(`${address}/api/rooms/${host.roomCode}/join`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'identity viewer' }),
+    }).then((r) => r.json());
+    const state = await fetch(`${address}/api/rooms/${host.roomCode}/state`, {
+      headers: { Authorization: `Bearer ${viewer.token}` },
+    }).then((r) => r.json());
+    expect(state.currentParticipant).toEqual({ id: viewer.participantId, role: 'viewer' });
+    const socket = connect(address, { auth: { roomCode: host.roomCode, token: viewer.token } });
+    const first = (await waitFor(socket, 'snapshot')) as {
+      data: { currentParticipant: { id: string; role: string } };
+    };
+    expect(first.data.currentParticipant).toEqual({ id: viewer.participantId, role: 'viewer' });
+    socket.close();
+    const reconnect = connect(address, { auth: { roomCode: host.roomCode, token: viewer.token } });
+    const second = (await waitFor(reconnect, 'snapshot')) as {
+      data: { currentParticipant: { id: string; role: string } };
+    };
+    expect(second.data.currentParticipant).toEqual({ id: viewer.participantId, role: 'viewer' });
+    reconnect.close();
+    const hostState = await fetch(`${address}/api/rooms/${host.roomCode}/state`, {
+      headers: { Authorization: `Bearer ${host.token}` },
+    }).then((r) => r.json());
+    expect(hostState.currentParticipant).toEqual({ id: host.participantId, role: 'host' });
+    const wrong = connect(address, {
+      auth: {
+        roomCode: host.roomCode,
+        token: (
+          await fetch(`${address}/api/rooms`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ displayName: 'other' }),
+          }).then((r) => r.json())
+        ).token,
+      },
+    });
+    await expect(
+      new Promise<void>((resolve, reject) => {
+        wrong.once('connect_error', reject);
+        wrong.once('connect', () => resolve());
+      }),
+    ).rejects.toThrow(/unauthorized/i);
+    wrong.close();
+  });
+
   it('returns bounded conflict exhaustion without broadcasting or mutating state', async () => {
     const repository = new FailSavesRepository(10);
     const service = new RoomService(repository);

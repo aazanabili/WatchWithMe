@@ -20,6 +20,7 @@ type Snap = {
   status: 'playing' | 'paused';
   positionSeconds: number;
   updatedAt: string;
+  revision: number;
 };
 declare global {
   interface Error {
@@ -35,9 +36,8 @@ export default function RoomClient({ roomId }: { roomId: string }) {
   const [ready, setReady] = useState(false);
   const [provider, setProvider] = useState<'youtube' | 'mp4'>('youtube');
   const [source, setSource] = useState('');
-  const [credential, setCredential] = useState<{ token?: string; participantId?: string } | null>(
-    null,
-  );
+  const [credential, setCredential] = useState<{ token?: string } | null>(null);
+  const [currentParticipant, setCurrentParticipant] = useState<Person | null>(null);
   const [checked, setChecked] = useState(false);
   const socket = useRef<Socket | null>(null);
   const adapter = useRef<PlayerAdapter | null>(null);
@@ -49,7 +49,7 @@ export default function RoomClient({ roomId }: { roomId: string }) {
   }, []);
   useEffect(() => {
     let alive = true;
-    let saved: { token?: string; participantId?: string } | null = null;
+    let saved: { token?: string } | null = null;
     try {
       saved = JSON.parse(sessionStorage.getItem(`watch-with-me:${roomId}`) || 'null');
     } catch {
@@ -83,6 +83,7 @@ export default function RoomClient({ roomId }: { roomId: string }) {
         if (!alive) return;
         setSnap(d.snapshot);
         setPeople(d.participants || []);
+        setCurrentParticipant(d.currentParticipant);
         const { io } = await import('socket.io-client');
         if (!alive) return;
         const s = io(SOCKET, { auth: { roomCode: roomId, token: saved?.token } });
@@ -101,6 +102,7 @@ export default function RoomClient({ roomId }: { roomId: string }) {
             const x = e.data || e;
             setSnap(x.snapshot || x);
             if (Array.isArray(x.participants)) setPeople(x.participants);
+            if (x.currentParticipant) setCurrentParticipant(x.currentParticipant);
           })
           .on('playback_changed', (e) => setSnap(e.data || e))
           .on('participants', (e) => {
@@ -154,11 +156,7 @@ export default function RoomClient({ roomId }: { roomId: string }) {
       setFeedback('تعذر النسخ — انسخ الرابط من شريط العنوان.');
     }
   }
-  const isHost = Boolean(
-    snap &&
-    credential?.participantId &&
-    people.some((p) => p.id === credential.participantId && p.role === 'host'),
-  );
+  const isHost = currentParticipant?.role === 'host';
   const position = snap ? expectedPosition(snap.positionSeconds, snap.updatedAt, snap.status) : 0;
   if (!checked)
     return (

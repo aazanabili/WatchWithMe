@@ -125,12 +125,29 @@ test('stale credentials are cleared and a viewer cannot promote itself through s
         `watch-with-me:${id}`,
         JSON.stringify({ token, participantId, role: 'host' }),
       ),
-    { id: created.roomId, token: guest.token, participantId: guest.participantId },
+    { id: created.roomId, token: guest.token, participantId: created.participantId },
   );
   await tampered.goto(`/room/${created.roomId}`);
   await expect(tampered.getByText('متصل ومتزامن')).toBeVisible();
   await expect(tampered.getByRole('button', { name: 'Load' })).toHaveCount(0);
   await expect(tampered.getByRole('button', { name: 'تشغيل' })).toHaveCount(0);
+  await tampered.reload();
+  await expect(tampered.getByText('متصل ومتزامن')).toBeVisible();
+  await expect(tampered.getByRole('button', { name: 'Load' })).toHaveCount(0);
+  const hostContext = await browser.newContext();
+  const hostPage = await hostContext.newPage();
+  await hostPage.addInitScript(
+    ({ id, token, participantId }) =>
+      sessionStorage.setItem(
+        `watch-with-me:${id}`,
+        JSON.stringify({ token, participantId, role: 'viewer' }),
+      ),
+    { id: created.roomId, token: created.token, participantId: created.participantId },
+  );
+  await hostPage.goto(`/room/${created.roomId}`);
+  await expect(hostPage.getByText('متصل ومتزامن')).toBeVisible();
+  await expect(hostPage.getByRole('button', { name: 'Load' })).toBeVisible();
+  await hostContext.close();
   await tamperedContext.close();
 });
 

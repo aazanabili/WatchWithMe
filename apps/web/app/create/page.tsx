@@ -18,10 +18,7 @@ export default function CreatePage() {
       });
       if (!r.ok) throw Error();
       const d = await r.json();
-      sessionStorage.setItem(
-        `watch-with-me:${d.roomId}`,
-        JSON.stringify({ token: d.token, participantId: d.participantId, role: d.role }),
-      );
+      sessionStorage.setItem(`watch-with-me:${d.roomId}`, JSON.stringify({ token: d.token }));
       location.href = `/room/${encodeURIComponent(d.roomId)}`;
     } catch {
       setError('تعذر إنشاء الغرفة الآن. حاول مجدداً.');

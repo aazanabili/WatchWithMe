@@ -29,10 +29,7 @@ export default function JoinPage() {
       });
       if (!r.ok) throw Error();
       const d = await r.json();
-      sessionStorage.setItem(
-        `watch-with-me:${d.roomId}`,
-        JSON.stringify({ token: d.token, participantId: d.participantId, role: d.role }),
-      );
+      sessionStorage.setItem(`watch-with-me:${d.roomId}`, JSON.stringify({ token: d.token }));
       location.href = `/room/${encodeURIComponent(id)}`;
     } catch {
       setError('لم نجد هذه الغرفة. تحقق من الرابط.');

@@ -211,12 +211,13 @@ export class RoomService {
     }
     return { kind: 'conflict' as const };
   }
-  snapshot(room: Room): Snapshot {
+  snapshot(room: Room, currentParticipant: Participant): Snapshot {
     return {
       version: CONTRACT_VERSION,
       roomId: room.code,
       snapshot: room.playback,
       participants: [...room.participants.values()].map(({ id, role }) => ({ id, role })),
+      currentParticipant: { id: currentParticipant.id, role: currentParticipant.role },
       sequence: room.sequence,
       revision: room.revision,
       serverTime: now(),
@@ -290,7 +291,7 @@ app.get('/api/rooms/:code/state', async (req: Request, res: Response) => {
   // Do not reveal whether an arbitrary room code exists to unauthenticated callers.
   const auth = await rooms.authenticate(String(req.params.code), bearer(req));
   if (!auth) return fail(res, 401, 'unauthorized');
-  return res.json(rooms.snapshot(auth.room));
+  return res.json(rooms.snapshot(auth.room, auth.participant));
 });
 app.post('/api/rooms', async (req: Request, res: Response) => {
   const parsed = CreateRoomRequest.safeParse(req.body);
@@ -431,7 +432,7 @@ io.on('connection', (socket) => {
       sequence: saved.sequence,
       revision: saved.revision,
       serverTime: now(),
-      data: rooms.snapshot(saved),
+      data: rooms.snapshot(saved, saved.participants.get(participant.id)!),
     });
   }).catch((error: unknown) => {
     log('room_queue_error', {
@@ -463,7 +464,7 @@ io.on('connection', (socket) => {
           sequence: room.sequence,
           revision: room.revision,
           serverTime: now(),
-          data: rooms.snapshot(room),
+          data: rooms.snapshot(room, currentParticipant),
         });
         return;
       }
@@ -487,7 +488,7 @@ io.on('connection', (socket) => {
           sequence: room.sequence,
           revision: room.revision,
           serverTime: now(),
-          data: rooms.snapshot(room),
+          data: rooms.snapshot(room, currentParticipant),
         });
         return;
       }
@@ -545,7 +546,7 @@ io.on('connection', (socket) => {
           sequence: result.room.sequence,
           revision: result.room.revision,
           serverTime: now(),
-          data: rooms.snapshot(result.room),
+          data: rooms.snapshot(result.room, result.room.participants.get(participant.id)!),
         });
         return;
       }
