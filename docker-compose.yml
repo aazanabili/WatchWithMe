@@ -31,10 +31,8 @@ services:
     volumes: [minio_data:/data]
     networks: [backend, frontend]
     ports:
-      - target: 9000
-        published: '9000'
-        host_ip: 127.0.0.1
-        protocol: tcp
+      - '9000:9000'
+      - '9001:9001'
     healthcheck:
       test: ['CMD', 'curl', '-fsS', 'http://localhost:9000/minio/health/live']
       interval: 5s
@@ -126,7 +124,7 @@ services:
       coturn: { condition: service_healthy }
     extra_hosts: ['host.docker.internal:host-gateway']
     networks: [frontend, backend]
-    ports: ['127.0.0.1:4000:4000']
+    ports: ['4000:4000']
     command:
       [
         'sh',
