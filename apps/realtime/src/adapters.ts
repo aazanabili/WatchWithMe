@@ -161,13 +161,25 @@ export class LiveKitRoomServiceAdapter implements LiveKitRoomService {
     secret = process.env.LIVEKIT_API_SECRET ?? '',
   ) { this.client = new RoomServiceClient(url, key, secret); }
   async updateParticipant(room: string, identity: string, permissions: LiveKitParticipantPermissions) {
-    await this.client.updateParticipant(room, identity, {
-      permission: {
-        canSubscribe: permissions.canSubscribe,
-        canPublish: permissions.canPublishAudio || permissions.canPublishVideo || permissions.canPublishScreen,
-        canPublishSources: liveKitSourcesFor(permissions),
-      },
-    });
+    try {
+      await this.client.updateParticipant(room, identity, {
+        permission: {
+          canSubscribe: permissions.canSubscribe,
+          canPublish: permissions.canPublishAudio || permissions.canPublishVideo || permissions.canPublishScreen,
+          canPublishSources: liveKitSourcesFor(permissions),
+        },
+      });
+    } catch (error) {
+      // A durable grant can be issued before the participant has joined the
+      // LiveKit room. There is no active participant to update in that case;
+      // the next token still carries the denied permissions. Preserve other
+      // failures so HTTP/socket callers do not acknowledge an unenforced
+      // mutation.
+      const status = (error as { status?: number; statusCode?: number }).status ?? (error as { statusCode?: number }).statusCode;
+      const message = error instanceof Error ? error.message.toLowerCase() : '';
+      if (status === 404 || message.includes('participant') && message.includes('not found')) return;
+      throw error;
+    }
   }
   async removeParticipant(room: string, identity: string) { await this.client.removeParticipant(room, identity); }
   async ready() {

@@ -1,4 +1,4 @@
-import { describe, expect, it, afterAll } from 'vitest';
+import { describe, expect, it, afterAll, vi } from 'vitest';
 import { io as connect, type Socket } from 'socket.io-client';
 import {
   httpServer,
@@ -8,6 +8,7 @@ import {
   RoomService,
   type Room,
   type RoomRepository,
+  liveKitRoomService,
 } from './index';
 import { ServerEvent } from '@watch-with-me/contracts';
 
@@ -172,6 +173,80 @@ describe('realtime MVP integration', async () => {
     expect(result).toEqual({ error: 'forbidden' });
     expect((await rooms.get(created.roomCode))?.conferenceEnabled).toBe(false);
     viewer.close();
+  });
+
+  it('shares LiveKit revoke/mute enforcement across HTTP and socket, preserving subscription', async () => {
+    const created = await fetch(`${address}/api/rooms`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'Grant host' }),
+    }).then((r) => r.json());
+    const joined = await fetch(`${address}/api/rooms/${created.roomCode}/join`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'Grant viewer' }),
+    }).then((r) => r.json());
+    const host = connect(address, { auth: { roomCode: created.roomCode, token: created.token } });
+    const viewer = connect(address, { auth: { roomCode: created.roomCode, token: joined.token } });
+    await Promise.all([waitFor(host, 'snapshot'), waitFor(viewer, 'snapshot')]);
+    const update = vi.spyOn(liveKitRoomService, 'updateParticipant');
+
+    const granted = await fetch(`${address}/api/rooms/${created.roomCode}/conference/grant`, {
+      method: 'POST', headers: { Authorization: `Bearer ${created.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ participantId: joined.participantId }),
+    });
+    expect(granted.status).toBe(200);
+
+    const revokeEvent = new Promise<unknown>((resolve) => viewer.on('conference.grants', function handler(value: unknown) {
+      const grant = value as { participantId?: string; canPublishAudio?: boolean };
+      if (grant.participantId === joined.participantId && grant.canPublishAudio === false) {
+        viewer.off('conference.grants', handler);
+        resolve(value);
+      }
+    }));
+    const revoked = await fetch(`${address}/api/rooms/${created.roomCode}/conference/revoke`, {
+      method: 'POST', headers: { Authorization: `Bearer ${created.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ participantId: joined.participantId }),
+    });
+    expect(revoked.status).toBe(204);
+    expect(await revokeEvent).toMatchObject({ participantId: joined.participantId, canPublishAudio: false, canPublishVideo: false, canPublishScreen: false, canSubscribe: true });
+    expect(update).toHaveBeenLastCalledWith(created.roomCode, joined.participantId, { canPublishAudio: false, canPublishVideo: false, canPublishScreen: false, canSubscribe: true });
+
+    const muteEvent = new Promise<unknown>((resolve) => viewer.on('conference.grants', function handler(value: unknown) {
+      const grant = value as { participantId?: string; canPublishAudio?: boolean };
+      if (grant.participantId === joined.participantId && grant.canPublishAudio === false) {
+        viewer.off('conference.grants', handler);
+        resolve(value);
+      }
+    }));
+    const muted = await new Promise<unknown>((resolve) => host.emit('moderation.mute', { participantId: joined.participantId }, resolve));
+    expect(muted).toEqual({ ok: true });
+    expect(await muteEvent).toMatchObject({ participantId: joined.participantId, canSubscribe: true });
+
+    const unauthorized = await fetch(`${address}/api/rooms/${created.roomCode}/conference/revoke`, {
+      method: 'POST', headers: { Authorization: `Bearer ${joined.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ participantId: created.participantId }),
+    });
+    expect(unauthorized.status).toBe(403);
+    update.mockRestore();
+    host.close();
+    viewer.close();
+  });
+
+  it('does not acknowledge revoke when LiveKit permission sync fails', async () => {
+    const created = await fetch(`${address}/api/rooms`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'Failure host' }),
+    }).then((r) => r.json());
+    const joined = await fetch(`${address}/api/rooms/${created.roomCode}/join`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'Failure viewer' }),
+    }).then((r) => r.json());
+    const host = connect(address, { auth: { roomCode: created.roomCode, token: created.token } });
+    await waitFor(host, 'snapshot');
+    const update = vi.spyOn(liveKitRoomService, 'updateParticipant').mockRejectedValueOnce(new Error('offline'));
+    const ack = await new Promise<unknown>((resolve) => host.emit('conference.revoke', { participantId: joined.participantId }, resolve));
+    expect(ack).toEqual({ error: 'livekit_sync_failed' });
+    update.mockRestore();
+    host.close();
   });
 
   it('can reconnect with the same capability and receives a snapshot', async () => {

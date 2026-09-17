@@ -13,6 +13,7 @@ RUN npm ci
 FROM deps AS build
 COPY . .
 RUN packages/database/node_modules/.bin/prisma generate --schema packages/database/prisma/schema.prisma && npm run build --workspace @watch-with-me/contracts && npm run build --workspace @watch-with-me/database && npm run build --workspace @watch-with-me/realtime
+RUN npm prune --omit=dev
 
 FROM node:20-alpine AS runner
 WORKDIR /app

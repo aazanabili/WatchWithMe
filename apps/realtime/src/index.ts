@@ -687,6 +687,8 @@ const conferenceState = (roomCode: string, participantId?: string) => {
 };
 const emitConferencePolicy = (roomCode: string) => io.to(roomCode).emit('conference.policy.changed', { enabled: conferencePolicies.get(roomCode) === true, maxParticipants: 10 });
 const emitConferenceGrant = (roomCode: string, participantId: string) => io.to(roomCode).emit('conference.grants', { participantId, ...(conferenceGrants.get(roomCode)?.get(participantId) ?? { canPublishAudio: false, canPublishVideo: false, canPublishScreen: false, canSubscribe: true }) });
+type ConferenceGrant = { canPublishAudio: boolean; canPublishVideo: boolean; canPublishScreen: boolean; canSubscribe: true };
+const noPublishGrant: ConferenceGrant = { canPublishAudio: false, canPublishVideo: false, canPublishScreen: false, canSubscribe: true };
 const syncLiveKitGrant = async (roomCode: string, participantId: string, grant: { canPublishAudio: boolean; canPublishVideo: boolean; canPublishScreen: boolean; canSubscribe: true }, revoke = false) => {
   try {
     await liveKitRoomService.updateParticipant(roomCode, participantId, grant);
@@ -694,6 +696,24 @@ const syncLiveKitGrant = async (roomCode: string, participantId: string, grant: 
   } catch {
     // A participant may not have connected yet; the durable grant map is authoritative for its next token.
   }
+};
+type ConferenceMutation = 'revoke' | 'mute';
+const applyConferenceMutation = async (roomCode: string, actorId: string, targetId: string | undefined, mutation: ConferenceMutation) => {
+  const fresh = await rooms.get(roomCode);
+  if (!fresh || fresh.participants.get(actorId)?.role !== 'host' || !targetId || !fresh.participants.has(targetId)) return 'forbidden' as const;
+  try {
+    // Update permissions in place: revoke/mute must stop publishing without
+    // disconnecting the viewer, so subscriptions and the existing room stay alive.
+    await liveKitRoomService.updateParticipant(roomCode, targetId, noPublishGrant);
+  } catch {
+    return 'livekit_sync_failed' as const;
+  }
+  const grants = conferenceGrants.get(roomCode) ?? new Map<string, ConferenceGrant>();
+  if (mutation === 'revoke') grants.delete(targetId);
+  else grants.set(targetId, noPublishGrant);
+  conferenceGrants.set(roomCode, grants);
+  emitConferenceGrant(roomCode, targetId);
+  return 'ok' as const;
 };
 app.post('/api/rooms/:code/conference/token', async (req, res) => {
   const a = await authenticated(req);
@@ -754,13 +774,9 @@ app.post('/api/rooms/:code/conference/grant', async (req, res) => {
 app.post('/api/rooms/:code/conference/revoke', async (req, res) => {
   const a = await hostAuth(req);
   if (!a) return fail(res, 403, 'forbidden');
-  const id = String(req.body?.participantId);
-  conferenceGrants.get(a.room.code)?.delete(id);
-  // Broadcast the durable revocation without changing the active LiveKit
-  // room. The viewer stops its own tracks from this event and remains
-  // subscribed to existing remote tracks; the next token carries the denied
-  // LiveKit grant.
-  emitConferenceGrant(a.room.code, id);
+  const result = await applyConferenceMutation(a.room.code, a.participant.id, req.body?.participantId, 'revoke');
+  if (result === 'forbidden') return fail(res, 403, 'forbidden');
+  if (result !== 'ok') return fail(res, 503, result);
   return res.status(204).send();
 });
 app.post('/api/rooms', async (req: Request, res: Response) => {
@@ -1235,12 +1251,8 @@ io.on('connection', (socket) => {
     const session = await rooms.authenticate(room.code, String(socket.data.token ?? ''));
     if (!session || session.participant.id !== participant.id)
       return ack?.({ error: 'unauthorized' });
-    const target = (raw as { participantId?: string })?.participantId;
-    const fresh = await rooms.get(room.code);
-    if (!fresh || fresh.participants.get(participant.id)?.role !== 'host' || !target)
-      return ack?.({ error: 'forbidden' });
-    emitRoom('conference.grant', { participantId: target, canPublishAudio: false });
-    ack?.({ ok: true });
+    const result = await applyConferenceMutation(room.code, participant.id, (raw as { participantId?: string })?.participantId, 'mute');
+    return ack?.(result === 'ok' ? { ok: true } : { error: result });
   });
   socket.on('conference.policy.changed', async (raw: unknown, ack?: (value: unknown) => void) => {
     const session = await rooms.authenticate(room.code, String(socket.data.token ?? ''));
@@ -1300,14 +1312,8 @@ io.on('connection', (socket) => {
     const session = await rooms.authenticate(room.code, String(socket.data.token ?? ''));
     if (!session || session.participant.id !== participant.id)
       return ack?.({ error: 'unauthorized' });
-    const fresh = await rooms.get(room.code);
-    const target = (raw as { participantId?: string })?.participantId;
-    if (!fresh || fresh.participants.get(participant.id)?.role !== 'host' || !target)
-      return ack?.({ error: 'forbidden' });
-    conferenceGrants.get(room.code)?.delete(target);
-    await syncLiveKitGrant(room.code, target, { canPublishAudio: false, canPublishVideo: false, canPublishScreen: false, canSubscribe: true }, true);
-    emitConferenceGrant(room.code, target);
-    ack?.({ ok: true });
+    const result = await applyConferenceMutation(room.code, participant.id, (raw as { participantId?: string })?.participantId, 'revoke');
+    return ack?.(result === 'ok' ? { ok: true } : { error: result });
   });
   socket.on('host.transfer', async (raw: unknown, ack?: (value: unknown) => void) => {
     const session = await rooms.authenticate(room.code, String(socket.data.token ?? ''));

@@ -171,25 +171,30 @@ export class InMemoryMediaAssetStore implements MediaAssetStore {
   async subtitles(assetId: string) { return [...this.tracks.values()].filter((track) => track.assetId === assetId); }
 }
 export const UPLOAD_MAX_BYTES = 2_000_000_000;
-const allowedExtensions = new Set(['mp4', 'webm', 'ts', 'vtt', 'srt']);
-const allowedMime = new Set([
-  'video/mp4',
-  'video/webm',
-  'video/mp2t',
-  'text/vtt',
-  'application/x-subrip',
-]);
+// Keep this association explicit: accepting a known extension and a known MIME
+// independently would allow an attacker to pair a safe extension with another
+// media type. The worker's ffprobe check remains the content-level defence.
+const allowedMimeByExtension: Readonly<Record<string, string>> = {
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.ts': 'video/mp2t',
+  '.vtt': 'text/vtt',
+  '.srt': 'application/x-subrip',
+};
 export function validateUpload(input: {
   fileName: string;
   contentType: string;
   sizeBytes: number;
 }) {
-  const extension = input.fileName.toLowerCase().split('.').pop() ?? '';
+  const fileName = input.fileName.toLowerCase();
+  const extension = `.${fileName.split('.').pop() ?? ''}`;
   if (
     input.fileName.length > 255 ||
     hasUnsafeControls(input.fileName) ||
     input.fileName.includes('/') ||
     input.fileName.includes('\\') ||
+    input.fileName.includes('?') ||
+    input.fileName.includes('#') ||
     input.fileName === '.' ||
     input.fileName === '..' ||
     input.fileName.split('.').includes('')
@@ -198,8 +203,7 @@ export function validateUpload(input: {
   return (
     input.sizeBytes > 0 &&
     input.sizeBytes <= UPLOAD_MAX_BYTES &&
-    allowedExtensions.has(extension) &&
-    allowedMime.has(input.contentType.toLowerCase())
+    allowedMimeByExtension[extension] === input.contentType.toLowerCase()
   );
 }
 

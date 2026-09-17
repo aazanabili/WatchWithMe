@@ -42,16 +42,46 @@ describe('realtime hostile input boundaries', () => {
     expect(CreateRoomRequest.safeParse({ displayName: 'host', role: 'host' }).success).toBe(false);
   });
 
-  it('rejects upload path traversal, mismatched extension/MIME, and oversized files', () => {
-    expect(
-      validateUpload({ fileName: '../escape.mp4', contentType: 'video/mp4', sizeBytes: 1 }),
-    ).toBe(false);
-    expect(validateUpload({ fileName: 'movie.exe', contentType: 'video/mp4', sizeBytes: 1 })).toBe(
-      false,
-    );
-    expect(validateUpload({ fileName: 'movie.mp4', contentType: 'text/plain', sizeBytes: 1 })).toBe(
-      false,
-    );
+  it.each([
+    ['movie.mp4', 'video/mp4'],
+    ['movie.webm', 'video/webm'],
+    ['movie.ts', 'video/mp2t'],
+    ['captions.vtt', 'text/vtt'],
+    ['captions.srt', 'application/x-subrip'],
+    ['MOVIE.MP4', 'VIDEO/MP4'],
+  ])('accepts the exact upload extension/MIME pair %s + %s', (fileName, contentType) => {
+    expect(validateUpload({ fileName, contentType, sizeBytes: 1 })).toBe(true);
+  });
+
+  it.each([
+    ['mp4', 'video/mp4'],
+    ['webm', 'video/webm'],
+    ['ts', 'video/mp2t'],
+    ['vtt', 'text/vtt'],
+    ['srt', 'application/x-subrip'],
+  ].flatMap(([extension, acceptedMime]) => [
+    ...['video/mp4', 'video/webm', 'video/mp2t', 'text/vtt', 'application/x-subrip']
+      .filter((mime) => mime !== acceptedMime)
+      .map((mime) => [`movie.${extension}`, mime]),
+  ]))('rejects mismatched extension/MIME pair %s + %s', (fileName, contentType) => {
+    expect(validateUpload({ fileName, contentType, sizeBytes: 1 })).toBe(false);
+  });
+
+  it.each([
+    ['../escape.mp4', 'video/mp4'],
+    ['movie.mp4/other', 'video/mp4'],
+    ['movie.mp4\\other', 'video/mp4'],
+    ['movie.mp4?download=1', 'video/mp4'],
+    ['movie.mp4#fragment', 'video/mp4'],
+    ['movie.mp4;evil.exe', 'video/mp4'],
+    ['movie.exe', 'video/mp4'],
+    ['movie.mp4', 'video/mp4; codecs=avc1'],
+    ['captions.srt', 'text/plain'],
+  ])('rejects hostile or non-exact upload input %s + %s', (fileName, contentType) => {
+    expect(validateUpload({ fileName, contentType, sizeBytes: 1 })).toBe(false);
+  });
+
+  it('rejects oversized files', () => {
     expect(
       validateUpload({ fileName: 'movie.mp4', contentType: 'video/mp4', sizeBytes: 2_000_000_001 }),
     ).toBe(false);

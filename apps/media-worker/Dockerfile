@@ -10,6 +10,7 @@ COPY apps/media-worker apps/media-worker
 COPY packages/database packages/database
 RUN packages/database/node_modules/.bin/prisma generate --schema packages/database/prisma/schema.prisma
 RUN npm run build --workspace @watch-with-me/media-worker
+RUN npm prune --omit=dev
 FROM node:20-bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates && rm -rf /var/lib/apt/lists/* && addgroup --system app && adduser --system --ingroup app app
 WORKDIR /app
