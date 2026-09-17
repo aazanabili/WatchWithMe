@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# Force LF for shell scripts so Windows checkouts (core.autocrlf=true)
+# don't bind-mount CRLF into Alpine's /bin/sh, which fails on `set -eu\r`.
+*.sh text eol=lf

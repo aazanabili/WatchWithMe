@@ -115,7 +115,7 @@ services:
       MINIO_REGION: us-east-1
       LIVEKIT_URL: ws://host.docker.internal:7880
       LIVEKIT_API_URL: http://host.docker.internal:7880
-      REALTIME_ORIGINS: http://localhost:3000
+      REALTIME_ORIGINS: ${REALTIME_ORIGINS:-http://localhost:3000}
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-dev-watch-with-me-key-32-characters}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-dev-watch-with-me-secret-32-chars-long}
       TURN_SHARED_SECRET: ${TURN_SHARED_SECRET:?TURN_SHARED_SECRET is required}
