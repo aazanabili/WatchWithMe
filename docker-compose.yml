@@ -21,17 +21,110 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
-  realtime:
-    build: { context: ., dockerfile: apps/realtime/Dockerfile }
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-02-28T09-55-16Z@sha256:a929054ae025fa7997857cd0e2a2e3029238e31ad89877326dc032f4c1a14259
+    command: server /data --address :9000 --console-address :9001
     environment:
-      NODE_ENV: production
-      REALTIME_PORT: 4000
-      DATABASE_URL: postgresql://watch_with_me:watch_with_me_dev@postgres:5432/watch_with_me
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_API_CORS_ALLOW_ORIGIN: ${MINIO_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+    volumes: [minio_data:/data]
+    networks: [backend, frontend]
+    ports:
+      - target: 9000
+        published: '9000'
+        host_ip: 127.0.0.1
+        protocol: tcp
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:9000/minio/health/live']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  minio-init:
+    image: quay.io/minio/mc:RELEASE.2025-05-21T01-59-54Z-cpuv1@sha256:41a3204156cfbf8d7b5ecbe08265a731acacb143eed7e401f431121df63dc630
+    entrypoint: ['/bin/sh', '/init.sh']
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-media}
+    volumes: ['./infra/minio/init.sh:/init.sh:ro']
+    depends_on: { minio: { condition: service_healthy } }
+    networks: [backend]
+    restart: 'no'
+  livekit:
+    image: livekit/livekit-server:v1.13.7@sha256:5d3dcc475d064536d9948ebe4eeab8e3b24d6f07a46f6d71a3415a2901bbdc52
+    network_mode: host
+    command: ['--config', '/etc/livekit/livekit.yaml', '--node-ip', '${LIVEKIT_NODE_IP:?LIVEKIT_NODE_IP is required}']
+    environment:
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-dev-watch-with-me-key-32-characters}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-dev-watch-with-me-secret-32-chars-long}
+      LIVEKIT_KEYS: '${LIVEKIT_API_KEY:-dev-watch-with-me-key-32-characters}: ${LIVEKIT_API_SECRET:-dev-watch-with-me-secret-32-chars-long}'
+    volumes: ['./infra/livekit/livekit.yaml:/etc/livekit/livekit.yaml:ro']
+    # Host networking is intentional: ICE advertises the detected LAN address.
+    healthcheck:
+      test: ['CMD', 'wget', '--spider', '-q', 'http://localhost:7880/']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  coturn:
+    image: coturn/coturn:4.6.3@sha256:71c3c990283385567f11794ee692e3a47b66fd9b0bb39e42afbe776e331dd888
+    network_mode: host
+    command: ['-n', '--log-file=stdout', '--no-cli', '--no-tls', '--no-dtls', '--fingerprint', '--use-auth-secret', '--static-auth-secret=${TURN_SHARED_SECRET:?TURN_SHARED_SECRET is required}', '--realm=${TURN_REALM:-watch-with-me.local}', '--listening-port=3478', '--listening-ip=0.0.0.0', '--relay-ip=${DOCKER_HOST_NETWORK_IP:?DOCKER_HOST_NETWORK_IP is required}', '--external-ip=${LIVEKIT_NODE_IP:?LIVEKIT_NODE_IP is required}/${DOCKER_HOST_NETWORK_IP:?DOCKER_HOST_NETWORK_IP is required}', '--min-port=30000', '--max-port=30010']
+    environment:
+      TURN_SHARED_SECRET: ${TURN_SHARED_SECRET:?TURN_SHARED_SECRET is required}
+    healthcheck:
+      test: ['CMD-SHELL', 'turnutils_uclient -t -p 3478 -n 1 -O -y 127.0.0.1 >/dev/null 2>&1']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+  media-worker:
+    build: { context: ., dockerfile: apps/media-worker/Dockerfile }
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
       REDIS_URL: redis://redis:6379
-      REALTIME_ORIGINS: http://localhost:3000
+      DATABASE_URL: postgresql://watch_with_me:watch_with_me_dev@postgres:5432/watch_with_me
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-media}
+      MEDIA_MAX_BYTES: ${MEDIA_MAX_BYTES:-2000000000}
+      MEDIA_JOB_TIMEOUT_MS: ${MEDIA_JOB_TIMEOUT_MS:-900000}
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
+      realtime: { condition: service_healthy }
+      minio-init: { condition: service_completed_successfully }
+    networks: [backend]
+  realtime:
+    build: { context: ., dockerfile: apps/realtime/Dockerfile }
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      REALTIME_PORT: 4000
+      DATABASE_URL: postgresql://watch_with_me:watch_with_me_dev@postgres:5432/watch_with_me
+      REDIS_URL: redis://redis:6379
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-media}
+      MINIO_PUBLIC_ENDPOINT: localhost
+      MINIO_PUBLIC_PORT: 9000
+      MINIO_PUBLIC_ORIGIN: ${MINIO_PUBLIC_ORIGIN:-http://localhost:9000}
+      ALLOW_INSECURE_LOCAL_MEDIA: ${ALLOW_INSECURE_LOCAL_MEDIA:-true}
+      MINIO_REGION: us-east-1
+      LIVEKIT_URL: ws://host.docker.internal:7880
+      LIVEKIT_API_URL: http://host.docker.internal:7880
+      REALTIME_ORIGINS: http://localhost:3000
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-dev-watch-with-me-key-32-characters}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-dev-watch-with-me-secret-32-chars-long}
+      TURN_SHARED_SECRET: ${TURN_SHARED_SECRET:?TURN_SHARED_SECRET is required}
+      TURN_URL: ${TURN_URL:-turn:${LIVEKIT_NODE_IP}:3478?transport=tcp}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      coturn: { condition: service_healthy }
+    extra_hosts: ['host.docker.internal:host-gateway']
     networks: [frontend, backend]
     ports: ['127.0.0.1:4000:4000']
     command:
@@ -51,11 +144,15 @@ services:
       dockerfile: apps/web/Dockerfile
       args:
         REALTIME_INTERNAL_URL: http://realtime:4000
+        NEXT_PUBLIC_LIVEKIT_URL: ${NEXT_PUBLIC_LIVEKIT_URL:-ws://127.0.0.1:7880}
+        NEXT_PUBLIC_LIVEKIT_RELAY_ONLY: ${NEXT_PUBLIC_LIVEKIT_RELAY_ONLY:-true}
     environment:
       HOSTNAME: 0.0.0.0
       NODE_ENV: production
       NEXT_PUBLIC_REALTIME_URL: http://localhost:4000
       REALTIME_INTERNAL_URL: http://realtime:4000
+      NEXT_PUBLIC_LIVEKIT_URL: ${NEXT_PUBLIC_LIVEKIT_URL:-ws://127.0.0.1:7880}
+      NEXT_PUBLIC_LIVEKIT_RELAY_ONLY: ${NEXT_PUBLIC_LIVEKIT_RELAY_ONLY:-true}
     depends_on:
       realtime: { condition: service_healthy }
     networks: [frontend]
@@ -72,3 +169,4 @@ networks:
 volumes:
   postgres_data:
   redis_data:
+  minio_data:

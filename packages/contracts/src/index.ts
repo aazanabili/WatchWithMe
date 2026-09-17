@@ -1,11 +1,12 @@
 import { z } from 'zod';
+import { MediaProvider, SyncMode } from './media';
 
 export const CONTRACT_VERSION = 'v1' as const;
 export const RoomRole = z.enum(['host', 'viewer']);
 export type RoomRole = z.infer<typeof RoomRole>;
 export const PlaybackStatus = z.enum(['playing', 'paused']);
 export type PlaybackStatus = z.infer<typeof PlaybackStatus>;
-export const VideoProvider = z.enum(['youtube', 'mp4']);
+export const VideoProvider = MediaProvider;
 export type VideoProvider = z.infer<typeof VideoProvider>;
 
 export const PlaybackSnapshot = z
@@ -14,6 +15,8 @@ export const PlaybackSnapshot = z
     videoId: z.string().trim().min(1).max(2048),
     status: PlaybackStatus,
     positionSeconds: z.number().nonnegative(),
+    durationSeconds: z.number().finite().nonnegative().nullable(),
+    syncMode: SyncMode.optional(),
     updatedAt: z.string().datetime(),
     revision: z.number().int().nonnegative(),
   })
@@ -53,6 +56,8 @@ export const Command = z.discriminatedUnion('type', [
       type: z.literal('load'),
       provider: VideoProvider,
       videoId: z.string().trim().min(1).max(2048),
+      durationSeconds: z.number().finite().nonnegative().nullable(),
+      syncMode: SyncMode.optional(),
     })
     .strict(),
   z.object({ type: z.literal('request_state') }).strict(),
@@ -135,3 +140,9 @@ export const JoinRoomRequest = z
   })
   .strict();
 export type JoinRoomRequest = z.infer<typeof JoinRoomRequest>;
+
+export * from './media';
+export * from './room';
+export * from './chat';
+export * from './conference';
+export * from './upload';

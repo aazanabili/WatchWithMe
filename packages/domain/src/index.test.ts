@@ -23,7 +23,7 @@ describe('room and playback domain', () => {
     room = addViewer(room, 'v');
     const loaded = transition(
       room,
-      command('1', { type: 'load', provider: 'mp4', videoId: 'movie' }),
+      command('1', { type: 'load', provider: 'mp4', videoId: 'movie', durationSeconds: null }),
       { actorId: 'h', now: at },
     );
     const played = transition(loaded.state, command('2', { type: 'play' }), {
@@ -54,12 +54,12 @@ describe('room and playback domain', () => {
     const room = createRoomState('r', 'h');
     const first = transition(
       room,
-      command('same', { type: 'load', provider: 'youtube', videoId: 'a' }),
+      command('same', { type: 'load', provider: 'youtube', videoId: 'a', durationSeconds: null }),
       { actorId: 'h', now: at },
     );
     const duplicate = transition(
       first.state,
-      command('same', { type: 'load', provider: 'youtube', videoId: 'b' }),
+      command('same', { type: 'load', provider: 'youtube', videoId: 'b', durationSeconds: null }),
       { actorId: 'h', now: at },
     );
     expect(duplicate.duplicate).toBe(true);
@@ -92,7 +92,7 @@ describe('room and playback domain', () => {
       transition(
         room,
         {
-          ...command('bad', { type: 'load', provider: 'mp4', videoId: 'x' }),
+          ...command('bad', { type: 'load', provider: 'mp4', videoId: 'x', durationSeconds: null }),
           version: 'v2' as 'v1',
         },
         { actorId: 'h', now: at },
@@ -100,7 +100,7 @@ describe('room and playback domain', () => {
     ).toThrow();
     const loaded = transition(
       room,
-      command('load', { type: 'load', provider: 'mp4', videoId: 'x' }),
+      command('load', { type: 'load', provider: 'mp4', videoId: 'x', durationSeconds: null }),
       { actorId: 'h', now: at },
     );
     expect(() =>

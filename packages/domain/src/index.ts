@@ -20,6 +20,9 @@ export interface RoomState {
   readonly revision: number;
   readonly sequence: number;
   readonly commands: Map<string, TransitionResult>;
+  /** Known media duration; null means the provider has not reported it yet. */
+  readonly durationSeconds: number | null;
+  readonly hostTransferPolicy?: 'auto_transfer_oldest';
 }
 
 export interface TransitionContext {
@@ -45,6 +48,8 @@ export function createRoomState(roomId: string, hostId: string): RoomState {
     revision: 0,
     sequence: 0,
     commands: new Map(),
+    durationSeconds: null,
+    hostTransferPolicy: 'auto_transfer_oldest',
   };
 }
 
@@ -52,6 +57,42 @@ export function addViewer(state: RoomState, id: string): RoomState {
   if (!id.trim() || state.lifecycle === 'closed' || state.participants.some((p) => p.id === id))
     return state;
   return { ...state, participants: [...state.participants, { id, role: 'viewer' }] };
+}
+
+/** Participant array order is the durable join order; revoked participants cannot act. */
+export function participantJoinOrder(state: RoomState, id: string): number | undefined {
+  const index = state.participants.findIndex((participant) => participant.id === id);
+  return index < 0 ? undefined : index;
+}
+
+export function transferHost(state: RoomState, actorId: string, targetId: string): RoomState {
+  if (state.participants.find((p) => p.id === actorId)?.role !== 'host')
+    throw new Error('host_only');
+  if (!state.participants.some((p) => p.id === targetId)) throw new Error('participant_not_found');
+  return {
+    ...state,
+    participants: state.participants.map((p) => ({
+      ...p,
+      role: p.id === targetId ? 'host' : 'viewer',
+    })),
+  };
+}
+
+export function autoTransferHost(state: RoomState, departingHostId: string): RoomState {
+  if (state.participants.find((p) => p.id === departingHostId)?.role !== 'host') return state;
+  const next = state.participants.find((p) => p.id !== departingHostId);
+  return next
+    ? transferHost(
+        {
+          ...state,
+          participants: state.participants.map((p) =>
+            p.id === departingHostId ? { ...p, role: 'viewer' } : p,
+          ),
+        },
+        next.id,
+        next.id,
+      )
+    : state;
 }
 
 export function removeParticipant(state: RoomState, id: string): RoomState {
@@ -75,6 +116,26 @@ function millis(value: Date | string | number): number {
 function position(value: number): number {
   if (!Number.isFinite(value) || value < 0) throw new Error('Invalid position');
   return value;
+}
+
+export function clampSeek(value: number, durationSeconds: number | null | undefined): number {
+  const safe = position(value);
+  return durationSeconds == null ? safe : Math.min(safe, durationSeconds);
+}
+
+export function setDuration(state: RoomState, durationSeconds: number | null): RoomState {
+  if (durationSeconds !== null && (!Number.isFinite(durationSeconds) || durationSeconds < 0))
+    throw new Error('Invalid duration');
+  return {
+    ...state,
+    durationSeconds,
+    playback: state.playback
+      ? {
+          ...state.playback,
+          positionSeconds: clampSeek(state.playback.positionSeconds, durationSeconds),
+        }
+      : null,
+  };
 }
 
 function iso(value: Date | string | number): string {
@@ -162,6 +223,7 @@ export function transition(
       videoId: command.videoId,
       status: 'paused',
       positionSeconds: 0,
+      durationSeconds: command.durationSeconds,
       updatedAt: now,
       revision: state.revision + 1,
     };
@@ -175,7 +237,11 @@ export function transition(
       updatedAt: now,
     };
   } else if (command.type === 'seek')
-    playback = { ...playback, positionSeconds: position(command.positionSeconds), updatedAt: now };
+    playback = {
+      ...playback,
+      positionSeconds: clampSeek(command.positionSeconds, state.durationSeconds),
+      updatedAt: now,
+    };
 
   const sequence = state.sequence + 1;
   const next: RoomState = {
@@ -211,7 +277,11 @@ export function load(
 ): TransitionResult {
   return transition(
     state,
-    { version: DOMAIN_VERSION, commandId, command: { type: 'load', provider, videoId } },
+    {
+      version: DOMAIN_VERSION,
+      commandId,
+      command: { type: 'load', provider, videoId, durationSeconds: null },
+    },
     context,
   );
 }

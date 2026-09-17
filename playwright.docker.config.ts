@@ -5,12 +5,13 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: 0,
+  preserveOutput: 'always',
   reporter: [['list'], ['html', { outputFolder: 'playwright-report/docker', open: 'never' }]],
   use: {
     baseURL: process.env.WWM_BASE_URL || 'http://localhost:3000',
-    trace: 'retain-on-failure',
+    trace: 'off',
     video: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },
-  projects: [{ name: 'chromium-docker', use: { ...devices['Desktop Chrome'] } }],
+  projects: [{ name: 'chromium-docker', use: { ...devices['Desktop Chrome'], launchOptions: { args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--allow-file-access-from-files', '--disable-features=WebRtcHideLocalIpsWithMdns'] } } }],
 });

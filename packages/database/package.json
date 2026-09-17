@@ -9,11 +9,11 @@
     "lint": "eslint src",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
-    "prisma:generate": "prisma generate",
+    "prisma:generate": "node node_modules/prisma/build/index.js generate --schema prisma/schema.prisma",
     "prisma:migrate": "prisma migrate deploy"
   },
   "dependencies": {
-    "@prisma/client": "^6.1.0",
+    "@prisma/client": "^6.19.3",
     "ioredis": "^5.4.1",
     "prisma": "^6.1.0"
   }

@@ -124,7 +124,45 @@ test('Docker E2E: independent host/viewer YouTube synchronization', async ({
         message: 'Viewer must observe YouTube Pause state',
       })
       .toBe('paused');
-    await host.getByLabel('التقديم في الفيديو').fill('7');
+    const seek = host.getByLabel('التقديم في الفيديو');
+    const box = await seek.boundingBox();
+    expect(box, 'seek control must have a pointer target').not.toBeNull();
+    const max = Number(await seek.getAttribute('max'));
+    const ratio = Math.min(7 / max, 0.99);
+    const direction = await seek.evaluate((element) => getComputedStyle(element).direction);
+    const targetX = box!.x + box!.width * (direction === 'rtl' ? 1 - ratio : ratio);
+    const targetY = box!.y + box!.height / 2;
+    // Exercise the native range with one pointer gesture. Unlike fill(), this
+    // emits the browser input/change path and then commits on release/blur.
+    await host.mouse.move(targetX, targetY);
+    await host.mouse.down();
+    await host.mouse.up();
+    // Commit the reset through the native input path at the exact minimum;
+    // keyboard End can leave a transient preview value in an RTL range.
+    await seek.evaluate((element) => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      setter?.call(element, '0');
+      element.dispatchEvent(new Event('input', { bubbles: true }));
+      element.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await expect
+      .poll(async () => Math.round((await snapshot(viewer, roomId)).snapshot.positionSeconds), {
+        timeout: 15_000,
+        message: 'Viewer must observe the range reset before incremental seek',
+      })
+      .toBeLessThan(1);
+    // Reassert paused state after the reset so the incremental contract is
+    // measured from a stable position, not from playback advancing during
+    // the reset round-trip.
+    await host.getByRole('button', { name: 'إيقاف' }).click();
+    await expect.poll(async () => (await snapshot(viewer, roomId)).snapshot.status).toBe('paused');
+    // The reset is committed at the exact range minimum, so always send the
+    // contract's 70 x 100ms increments rather than deriving a count from a
+    // transient snapshot sample.
+    const steps = 70;
+    await seek.focus();
+    for (let i = 0; i < steps; i += 1) await seek.press('ArrowLeft', { delay: 300 });
+    await seek.press('Tab');
     await expect
       .poll(async () => (await snapshot(viewer, roomId)).snapshot.positionSeconds, {
         timeout: 15_000,

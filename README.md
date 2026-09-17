@@ -1,32 +1,121 @@
 # Watch With Me
 
-تطبيق TypeScript monorepo (يتطلب Node.js 20 أو أحدث) لإنشاء غرف مشاهدة متزامنة.
-PostgreSQL هو مصدر البيانات الدائم، وRedis للحالة الحية والحضور. التشغيل الموصى به
-للتجربة المحلية هو Docker Compose عبر scripts التشغيل أدناه.
+تطبيق TypeScript monorepo لبناء غرف مشاهدة جماعية: يختار المضيف الوسيط ويتحكم في
+التشغيل، بينما يتابع المشاهدون الحالة نفسها ويمكنهم المحادثة والمشاركة في مؤتمر
+صوت/فيديو عند منحهم الصلاحية. PostgreSQL هو التخزين الدائم للغرف والمشاركين، وRedis
+للمحادثة المؤقتة وطابور وظائف الوسائط، وMinIO للوسائط، وLiveKit/coturn للمؤتمر.
 
-## المتطلبات (Prerequisites)
+> هذا المستند يصف التطوير المحلي وCompose في هذا المستودع، وليس إعداد إنتاج جاهزاً.
+> لا تنسخ أسرار التطوير أو إعدادات `network_mode: host` إلى الإنتاج دون مراجعة أمنية.
 
-- Docker Desktop (Windows/macOS) أو Docker Engine مع Docker Compose v2 (Linux).
-- Node.js 20+ وnpm؛ يلزم npm فقط لأوامر تثبيت الحزم والاختبارات.
-- على Linux: Bash و`curl` لفحص جاهزية HTTP (ويُستحسن `ss` أو `lsof` لأمر `doctor`).
-- المنفذان المحليان 3000 (web) و4000 (realtime) متاحان.
+## المحتويات
 
-شغّل Docker Desktop وانتظر حتى يظهر أنه يعمل قبل تشغيل أي أمر. تتحقق scripts من Docker
-daemon ومن صحة `docker-compose.yml` تلقائياً.
+- [الميزات والحدود](#الميزات-والحدود)
+- [المعمارية وتدفق البيانات](#المعمارية-وتدفق-البيانات)
+- [المتطلبات](#المتطلبات)
+- [الإعداد والأسرار](#الإعداد-والأسرار)
+- [Quick Start](#quick-start)
+- [مرجع أوامر السكربت](#مرجع-أوامر-السكربت)
+- [المنافذ والبروتوكولات والتعرض](#المنافذ-والبروتوكولات-والتعرض)
+- [استخدام الغرفة](#استخدام-الغرفة)
+- [الاختبارات والتطوير المحلي](#الاختبارات-والتطوير-المحلي)
+- [استكشاف الأخطاء](#استكشاف-الأخطاء)
+- [الإيقاف والتنظيف](#الإيقاف-والتنظيف)
+- [الأمان والخصوصية والإتاحة وSEO](#الأمان-والخصوصية-والإتاحة-وseo)
+- [قائمة نشر](#قائمة-نشر)
 
-## Quick start — Windows (PowerShell)
+## الميزات والحدود
 
-من جذر المشروع:
+- إنشاء غرفة من `/create` والانضمام من `/join` باسم عرض ورمز/رابط دعوة.
+- YouTube، ورابط MP4 مباشر عبر HTTPS، والوسائط المرفوعة (MP4/WebM/TS حتى **2GB**) تدعم **full-sync** للمضيف: أوامر `play` و`pause` و`seek` تصل للمشاهدين، مع خضوع YouTube لقيود التضمين. لا تُقبل روابط WebM المباشرة كموفر خارجي. يفحص الرفع `ffprobe` المدة ويحوّل TS عبر FFmpeg؛ MP4/WebM يُفحصان ثم يُحفظان كما هما.
+- موصلات Instagram وTikTok وVimeo وDailymotion وTwitch وFacebook تجريبية و**view-only**؛ التنفيذ لا يضمن تشغيل الرابط المحدد أو الفيديو المحدد ولا full sync لها.
+- الترجمة المنفصلة VTT أو SRT (يوصى ألا تتجاوز 20MB) مع التحقق من البنية وتحويل SRT إلى VTT. حدّ `media-worker` الفعلي 20MB بعد الرفع/التنزيل؛ قد يقبل upload intent الحد العام أولاً ثم تفشل المعالجة إذا تجاوزت الترجمة 20MB. رابط playback الموقّع مدته 5 دقائق، وasset/upload/chat لها نافذة صلاحية ثلاث ساعات.
+- محادثة Redis مؤقتة: 2,000 حرف، تاريخ حتى 100 رسالة، تنظيف HTML/محارف التحكم، وحذف الرسائل للمضيف.
+- مؤتمر LiveKit: كاميرا، ميكروفون، مشاركة شاشة، وخيار صوت النظام. يبدأه المضيف؛ صلاحيات `canPublishAudio`, `canPublishVideo`, `canPublishScreen`, و`canSubscribe` تحدد ما يستطيع كل مشارك فعله. المشاهد لا يطلب صلاحية جهاز قبل الضغط، ولا يستطيع تشغيل جهاز شخص آخر قسراً.
+- تحكم المضيف في منح/سحب صلاحيات المؤتمر، الكتم، والطرد، ونقل المضيف حيث تدعمه واجهة الغرفة/الخدمة. كتم المشاهدين محلي في واجهة المستمع، بينما إجراءات moderation الموجهة للمشارك للمضيف.
+- سقف العرض المرئي في واجهة المؤتمر 6 مشاركين، مع تتبع LiveKit للوسائط المنشورة.
+
+### full-sync مقابل view-only
+
+`full-sync` هنا يعني أن المضيف يدير timeline الغرفة (تشغيل، إيقاف، وتقديم) وتصل
+الأوامر للمشاركين؛ ينطبق ذلك على YouTube (ضمن قيود embed)، وعلى رابط MP4 المباشر،
+وعلى الوسائط المرفوعة. لا يعني مزامنة أجهزة المستخدم أو ضمان تطابق buffering والشبكة
+لحظياً. المشاهدون view-only للتشغيل، لكنهم يستطيعون التحكم في كتم صوتهم/مستوى
+صوتهم محلياً، وإدارة جهازهم إذا منحهم المضيف grant. الموصلات الاجتماعية الستة
+التجريبية view-only ولا تضمن تشغيل الرابط المحدد أو full sync؛ لا توجد مساواة في
+التحكم بين جميع المشاركين ولا مزامنة DRM أو محتوى YouTube المحظور تضمينه.
+
+## المعمارية وتدفق البيانات
+
+الخدمات المعرفة في `docker-compose.yml`:
+
+| الخدمة | الدور |
+| --- | --- |
+| `web` | Next.js UI على 3000؛ يتصل بالـrealtime وبـLiveKit من المتصفح. |
+| `realtime` | API وSocket.IO على 4000: الغرف، الحضور، playback events، chat، media intents، وLiveKit tokens. يشغّل Prisma migrations عند بدء Compose. |
+| `postgres` | PostgreSQL 16 للغرف والمشاركين والـmedia assets والترجمات. |
+| `redis` | قوائم chat ذات TTL وطابور وظائف `media-worker` المؤقت. لا يخزن الغرف أو المشاركين. |
+| `minio` و`minio-init` | Object storage وتهيئة bucket `media`؛ worker وrealtime يصلان داخلياً، والـAPI يوقّع URLs. |
+| `media-worker` | يستهلك الوظائف، يحد الحجم، يستعمل `ffprobe`/`ffmpeg`، يحوّل TS والترجمات وينظف المنتهي. |
+| `livekit` | SFU للمؤتمر؛ image مثبتة digest، وbind على host network. |
+| `coturn` | TURN relay على TCP وUDP في port 3478، مع relay range 30000–30010. إعداد المتصفح الحالي يطلب TURN عبر TCP فقط عبر `transport=tcp`. |
+
+التدفق المعتاد: المتصفح يطلب token من `realtime`؛ تُحفظ حالة الغرفة في PostgreSQL
+وتتبادل clients أحداث الغرفة عبر Socket.IO مباشرة من `realtime`؛ يرفع المضيف إلى
+presigned MinIO URL ثم يضع worker المهمة ويحدّث asset؛ يطلب المتصفح playback URL؛
+وللمؤتمر يصدر realtime token قصير العمر وICE servers، ثم يتصل المتصفح بـLiveKit/coturn
+مباشرة. يُستخدم Redis للدردشة المؤقتة وطابور وظائف الوسائط فقط، وليس كطبقة presence
+أو broadcast للغرفة.
+
+## المتطلبات
+
+- Node.js 20+ وnpm، وDocker Compose v2.
+- Windows: Docker Desktop حديث مع Linux containers وPowerShell. يجب تفعيل **Host
+  Networking** في Docker Desktop: Settings → Resources → Network → Enable host
+  networking (ثم Apply/Restart)، إن كان الخيار متاحاً في إصدارك. Compose يستخدم
+  `network_mode: host` لـLiveKit وcoturn عمداً؛ دون ذلك قد تفشل ICE/relay حتى لو كانت
+  باقي الخدمات سليمة.
+- Linux: Docker Engine/Compose v2، Bash، و`curl` لفحص الجاهزية؛ يستحسن `ip` و`ss`
+  أو `lsof`. يجب أن يدعم المضيف host networking وأن تسمح firewall بالمنافذ المذكورة
+  أدناه من الشبكة المطلوبة، خصوصاً 7880 وTCP/UDP 3478 و30000–30010، وإلا لن يعمل relay.
+- المنافذ المحلية 3000 و4000 و7880 و3478 و9000 غير مشغولة. لا حاجة لفتح PostgreSQL
+  أو Redis خارج شبكة Compose.
+
+## الإعداد والأسرار
+
+```bash
+cp .env.example .env                 # PowerShell: Copy-Item .env.example .env
+```
+
+غيّر القيم السرية في `.env` المحلي: `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`,
+`LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, و`TURN_SHARED_SECRET`. القيم الموجودة في
+`.env.example` placeholders/تطوير فقط؛ لا تضع production secrets أو credentials في
+Git أو README أو سجلات CI. احفظ `.env` خارج النسخ الاحتياطي العام ودوّرها عند
+المشاركة. اترك `LIVEKIT_NODE_IP` و`DOCKER_HOST_NETWORK_IP` غير مضبوطين عادةً؛
+السكربتان تكتشفان العناوين ديناميكياً. عند الفشل، اضبطهما إلى عناوين LAN/host-network
+المناسبة محلياً فقط، ولا تثبّت عنواناً من بيئة أخرى في الوثائق.
+
+إعدادات مهمة: `NEXT_PUBLIC_REALTIME_URL`, `REALTIME_ORIGINS`, `MINIO_PUBLIC_ORIGIN`,
+`NEXT_PUBLIC_LIVEKIT_RELAY_ONLY=true`, `MEDIA_MAX_BYTES`، و`MEDIA_JOB_TIMEOUT_MS`.
+القيمة Compose الافتراضية لحجم worker هي 2GB؛ لا ترفع الحد دون مراجعة التخزين
+والـworker. `WATCH_WITH_ME_TIMEOUT` اختياري (120 ثانية افتراضياً).
+
+> لا تحتاج عادةً إلى تشغيل `npm run prisma:generate` قبل Docker: صور Compose تولّد
+> Prisma أثناء build، و`realtime` يطبق migrations عند الإقلاع. الأمر موجود فعلياً
+> في `package.json` لمن يريد توليد عميل المضيف.
+
+## Quick Start
+
+### Windows PowerShell
 
 ```powershell
 Copy-Item .env.example .env
 npm install
-npm run prisma:generate
+.\scripts\watch-with-me.ps1 doctor
 .\scripts\watch-with-me.ps1 start
 ```
 
-بعد الجاهزية افتح [http://127.0.0.1:3000/](http://127.0.0.1:3000/). إذا منع PowerShell
-تشغيل ملف السكربت، لا تستخدم `Bypass` دائماً. اسمح به لهذه الجلسة فقط:
+افتح <http://127.0.0.1:3000/>. إذا منع PowerShell السكربت، اسمح لهذه الجلسة فقط:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
@@ -34,168 +123,172 @@ Unblock-File -Path .\scripts\watch-with-me.ps1
 .\scripts\watch-with-me.ps1 start
 ```
 
-ينتهي أثر `Scope Process` بإغلاق نافذة PowerShell. نفّذ `Unblock-File` فقط لملف المشروع
-الموثوق، ولا تغيّر Execution Policy على مستوى الجهاز لمجرد تشغيل هذا السكربت.
+لا تستخدم `Bypass` دائماً ولا تغيّر Execution Policy على مستوى الجهاز.
 
-## Quick start — Linux
+### Linux / Bash (أو Git Bash/WSL)
 
 ```bash
 cp .env.example .env
 npm install
-npm run prisma:generate
 chmod +x scripts/watch-with-me.sh
+./scripts/watch-with-me.sh doctor
 ./scripts/watch-with-me.sh start
 ```
 
-افتح [http://127.0.0.1:3000/](http://127.0.0.1:3000/). المتغير الاختياري
-`WATCH_WITH_ME_TIMEOUT` يحدد مهلة الانتظار بالثواني (الافتراضي `120`).
+بعدها افتح <http://127.0.0.1:3000/>. من WSL/Git Bash تأكد أن `docker` يتصل بالـDocker
+daemon الصحيح وأن host networking/firewall ينتميان إلى البيئة التي تشغّل Docker.
 
-## Docker command reference
+## مرجع أوامر السكربت
 
-السكريبتان `scripts/watch-with-me.ps1` و`scripts/watch-with-me.sh` يقبلان الأوامر التالية
-حرفياً. في Windows استخدم البادئة
-`.\scripts\watch-with-me.ps1` (من دون مسافة قبل الأمر؛ الصيغة الصحيحة موضحة في الأمثلة)، وفي
-Linux استخدم `./scripts/watch-with-me.sh`.
+البادئة في Windows هي `.\scripts\watch-with-me.ps1` وفي Bash هي
+`./scripts/watch-with-me.sh`. هذه هي الأوامر الفعلية في السكربتين:
 
-<!-- prettier-ignore -->
-| Command | الوظيفة والخيارات الفعلية |
+| الأمر | السلوك والخيارات |
 | --- | --- |
-| `start` | يبني الصور ثم يشغّل الخدمات في الخلفية (`docker compose up --build -d`) وينتظر الجاهزية. يقبل `--no-build`. |
-| `stop` | يوقف الحاويات فقط؛ لا يحذفها ولا يحذف البيانات. لا يقبل خيارات. |
-| `restart` | ينفذ stop ثم يشغّل الخدمات، مع build افتراضياً؛ يقبل `--no-build`. |
+| `start [--no-build]` | `docker compose up -d`، أو `up --build -d` افتراضياً، ثم ينتظر الصحة. |
+| `stop` | يوقف الحاويات دون حذفها أو volumes؛ بلا خيارات. |
+| `restart [--no-build]` | stop ثم start؛ يقبل `--no-build`. |
 | `status` | يعرض `docker compose ps`. |
-| `health` | ينتظر صحة `postgres`, `redis`, `realtime`, `web` واستجابة web، بمهلة 120 ثانية افتراضياً. |
-| `logs SERVICE` | يعرض آخر 100 سطر لخدمة واحدة فقط: `web` أو `realtime` أو `postgres` أو `redis`. |
-| `remove` | ينفذ `docker compose down --remove-orphans`: يحذف الحاويات والشبكات، لا volumes. |
-| `clean` | ينفذ `docker compose down --volumes --remove-orphans` بعد تأكيد `DELETE`؛ يقبل `--yes`. يحذف حاويات وشبكات وvolumes المشروع، فيترك Docker بلا موارد Compose لهذه البيئة (ولا يحذف images أو cache). |
-| `test` | ينتظر الجاهزية ثم يشغّل `npm --prefix <root> run test:e2e:docker`؛ هذا هو Docker E2E الحقيقي. |
-| `doctor` | يفحص Docker والـdaemon وCompose وتعارض 3000/4000، ولا يقتل أي process. |
-| `help` | يعرض قائمة الاستخدام. ويدعم أيضاً `-h` و`--help`. |
-| `config` | يتحقق من Compose ثم يعرض ناتج `docker compose config`. |
+| `health` | ينتظر صحة كل الخدمات واستجابة web. |
+| `logs SERVICE [--follow] [--tail N]` | SERVICE واحد من `web`, `realtime`, `postgres`, `redis`, `minio`, `livekit`, `coturn`, `media-worker`؛ الذيل 100 افتراضياً. |
+| `remove` | `down --remove-orphans`: يحذف containers/networks ويُبقي volumes. |
+| `clean [--yes]` | `down --volumes --remove-orphans`؛ يتطلب كتابة `DELETE` أو `--yes` ويحذف بيانات volumes. |
+| `test` | ينتظر الصحة ثم ينفذ `npm --prefix <root> run test:e2e:docker`. |
+| `doctor` | يفحص Docker daemon وCompose و3000/4000 ولا يقتل أي process. |
+| `config` | ينفذ `docker compose config` بعد preflight. |
+| `help`, `-h`, `--help` | يعرض الاستخدام. |
 
 أمثلة:
 
 ```bash
-./scripts/watch-with-me.sh status
-./scripts/watch-with-me.sh logs web
-./scripts/watch-with-me.sh logs realtime --follow
-./scripts/watch-with-me.sh logs postgres --tail 200
+./scripts/watch-with-me.sh logs realtime --follow --tail 50
 ./scripts/watch-with-me.sh restart --no-build
-./scripts/watch-with-me.sh remove
 ```
 
-في PowerShell نفس الأوامر بامتداد السكربت:
+## المنافذ والبروتوكولات والتعرض
 
-```powershell
-.\scripts\watch-with-me.ps1 logs web
-.\scripts\watch-with-me.ps1 logs realtime --follow --tail 50
-```
+| المنفذ | الخدمة/البروتوكول | التعرض المحلي |
+| --- | --- | --- |
+| 3000/tcp HTTP | web | منشور من Compose؛ واجهة المستخدم. |
+| 4000/tcp HTTP/WebSocket | realtime | مربوط بـ`127.0.0.1`؛ health `/health/live` و`/health/ready`. |
+| 9000/tcp HTTP | MinIO API | مربوط بـ`127.0.0.1`؛ لا تنشر console 9001 في Compose. |
+| 7880/tcp HTTP/WebSocket | LiveKit signaling/API | host network؛ bind wildcard بسبب RTC، فاحمه بـfirewall. |
+| 3478/tcp+udp TURN | coturn | host network؛ يستمع TCP وUDP، بينما يطلب browser URL الحالي TCP عبر `turn:...:3478?transport=tcp`. |
+| 30000–30010 | coturn relay | host network؛ افتحها فقط للشبكة المطلوبة. |
+| 7881/tcp و7882/udp | LiveKit RTC | يضبطها LiveKit؛ لا تضف mapping عشوائياً، وراجع firewall إذا استعملت direct ICE. |
 
-### stop vs remove vs clean
+PostgreSQL 5432 وRedis 6379 غير منشورين؛ يتصل بهما التطبيق عبر `backend` الداخلي.
+في Docker Desktop، لا تفترض أن localhost وLAN في host network متطابقان: السكربت
+يكتشف `LIVEKIT_NODE_IP` و`DOCKER_HOST_NETWORK_IP` ويحقنهما في Compose.
 
-- **stop**: إيقاف مؤقت؛ يمكن إعادة التشغيل بـ`start` أو `restart`، والبيانات تبقى.
-- **remove**: إزالة الحاويات والشبكات (مع `--remove-orphans`) مع إبقاء volumes.
-- **clean**: إزالة الحاويات والشبكات وvolumes؛ وهذا يمسح بيانات PostgreSQL وRedis.
-  استخدمه فقط لإعادة ضبط البيئة. الوضع التفاعلي يتطلب كتابة `DELETE` حرفياً، أو
-  استخدم `clean --yes` عندما تكون متأكداً. لا يمكن التراجع عن حذف البيانات من volume.
+## استخدام الغرفة
 
-## Health URLs
+1. افتح الصفحة الرئيسية أو `/create`، اكتب اسم العرض وأنشئ الغرفة.
+2. اختر YouTube أو رابط MP4 مباشر عبر HTTPS أو ارفع ملفاً محلياً بصيغة MP4/WebM/TS؛ هذه مسارات full-sync للمضيف. ويمكنك بدلاً من ذلك تجربة أحد الموصلات الاجتماعية الستة للعرض فقط؛ لا تفترض أن الموصل سيشغل الرابط المحدد أو يزامنه. الرفع للمضيف فقط، ثم انتظر `تجهيز الفيديو` حتى يصبح playback جاهزاً.
+3. أضف VTT/SRT إن كانت الواجهة/نقطة API متاحة، واختر اللغة؛ لا ترفع HTML أو روابط داخل ملف الترجمة.
+4. انسخ رمز الغرفة/رابط الدعوة. افتح نافذة خاصة أو متصفحاً ثانياً، ادخل `/join` واستخدم اسماً مختلفاً.
+5. المضيف يضغط تشغيل/إيقاف أو يغيّر timeline؛ المشاهدون يرون الحالة المتزامنة ويستطيعون كتم صوتهم محلياً فقط.
+6. أرسل رسالة من Chat (Enter للإرسال وShift+Enter لسطر جديد). تاريخ chat مؤقت ثلاث ساعات، والمضيف يستطيع حذف الرسالة.
+7. فعّل مؤتمر LiveKit من لوحة المضيف. امنح المشاهدين grant عند الحاجة؛ كل مشارك يضغط بنفسه للانضمام ويسمح للمتصفح بالكاميرا/الميكروفون.
+8. شغّل الكاميرا أو الميكروفون، أو اختر `مشاركة الشاشة` وفعّل `مشاركة صوت النظام` قبل الطلب. يستطيع المضيف grant/revoke وmute/kick؛ غادر الفيديو دون مغادرة غرفة المشاهدة.
+9. عند الحاجة إلى تسليم القيادة، استخدم host transfer في واجهة/خدمة الغرفة، ثم تحقّق أن المضيف الجديد يملك controls قبل خروج المضيف القديم.
+10. للخروج، أغلق الغرفة/التبويب أو غادر المؤتمر؛ استخدم `stop` لإيقاف البيئة كاملة.
 
-- Web: [http://127.0.0.1:3000/](http://127.0.0.1:3000/)
-- Realtime liveness: [http://127.0.0.1:4000/health/live](http://127.0.0.1:4000/health/live)
-- Realtime readiness: [http://127.0.0.1:4000/health/ready](http://127.0.0.1:4000/health/ready)
+## الاختبارات والتطوير المحلي
 
-## تجربة YouTube بمستخدمين
+### سكربتات npm الفعلية
 
-1. افتح `/create` أو الصفحة الرئيسية، أدخل اسم العرض، وأنشئ غرفة.
-2. في الغرفة أدخل رابط الاختبار
-   [https://www.youtube.com/watch?v=3QM6MvvGwTg](https://www.youtube.com/watch?v=3QM6MvvGwTg)
-   كمصدر YouTube، ثم احتفظ برمز الغرفة/رابط الدعوة.
-3. افتح نافذة خاصة أو متصفحاً ثانياً، ادخل `/join`، واستخدم رمز الغرفة واسماً مختلفاً.
-4. اختبر التشغيل والإيقاف والتزامن بين النافذتين.
+`npm run dev` يشغل **web وrealtime فقط** محلياً. يتطلب PostgreSQL وRedis وMinIO
+وLiveKit/coturn مهيأة وقابلة للوصول وفق `.env`؛ شغّل `media-worker` منفصلاً إذا أردت
+معالجة الرفع/الترجمة. لا ينشئ هذا الأمر خدمات البنية التحتية تلقائياً.
+والأوامر الأخرى هي: `npm run build`, `lint`, `typecheck`, `test`, `format`,
+`format:check`, `prisma:generate`, `prisma:migrate`, `docker:config`, `docker:build`,
+`docker:up`, `test:e2e`, `test:e2e:docker`, `test:e2e:qa`, و`test:e2e:qa:all`.
 
-قد يمنع YouTube تشغيل بعض المقاطع داخل iframe بسبب **embed restrictions** التي يحددها
-مالك الفيديو أو YouTube (مثل تعطيل التضمين أو قيود المنطقة/العمر). هذا لا يعني أن Docker
-أو الغرفة معطّلان؛ جرّب فيديو يسمح بالتضمين. التطبيق لا ينزّل الوسائط ولا يعمل proxy لها.
+لا تشغّل `npm run dev` بالتوازي مع Compose: كلاهما يستخدم 3000/4000 وقد تتصل ببيئة
+خاطئة. يوجد فصل واضح بين بوابات الاختبار:
 
-## لا تشغّل dev مع Docker
+- **Local gate:** `npm run lint && npm run typecheck && npm test && npm run build`.
+- **Local Playwright:** `npm run test:e2e` يشغل web/realtime عبر `webServer` على
+  `127.0.0.1`، وChromium افتراضياً؛ `PW_ALL_BROWSERS=1` يضيف Firefox/WebKit. أوقف
+  Compose وأي dev servers/خدمات تستخدم 3000 أو 4000 قبل التشغيل؛ `reuseExistingServer`
+  قد يعيد استخدام خدمة قائمة ويجعل الاختبار يتصل ببيئة خاطئة.
+- **Docker gate:** بعد `start` شغّل `npm run test:e2e:docker` أو أمر السكربت `test`؛
+  يستخدم `playwright.docker.config.ts` و`tests/e2e/docker.spec.ts` على
+  `http://localhost:3000`، مع video وscreenshot عند الفشل (trace معطّل في إعداد Docker).
+- `npm run test:all` **ليس** بوابة Docker ولا يشغّل `test:e2e:docker` أو QA؛ هو حرفياً
+  `lint && typecheck && npm test && test:e2e && build`. لا تنسب إليه تغطية Compose.
 
-لا تشغّل `npm run dev` بالتوازي مع Docker Compose: كلاهما يحاول استخدام 3000 للـweb
-و4000 للـrealtime، وقد ينتج تعارض منافذ أو اتصالاً بخدمة مختلفة. اختر مساراً واحداً:
-Docker عبر `start`، أو التطوير المحلي عبر `npm run dev` بعد تجهيز PostgreSQL وRedis
-وفق إعدادات `.env`.
+لـREADME فقط، تحقق من التنسيق بـ`npm run format:check`؛ الأمر يفحص المشروع كله وقد
+يكشف ملفات أخرى غير معدّلة. لا تشغّل `format` لأنه يكتب ملفات كثيرة.
 
-إذا ظهر تعارض 3000/4000، أوقف المسار الآخر أولاً، ثم شغّل:
+## استكشاف الأخطاء
 
-```bash
-./scripts/watch-with-me.sh doctor
-```
+- **Docker غير متاح:** شغّل Docker Desktop/Engine، تأكد من Linux containers، ثم `doctor`.
+- **Compose config يفشل:** نفّذ `config` من جذر المستودع، راجع `.env`، وتأكد أن
+  `LIVEKIT_NODE_IP` و`DOCKER_HOST_NETWORK_IP` قابلان للاكتشاف أو مضبوطتان محلياً.
+- **Windows وhost networking:** فعّل Docker Desktop Host Networking ثم Apply/Restart؛
+  تحقق من أن خيار الإصدار مدعوم، ومن Windows Firewall وVPN وWSL لا تمنع 7880/3478/relay.
+- **Linux وICE/TURN:** تحقق من `ip route`, `ss -ltnup`, قواعد firewall وNAT؛ اسمح
+  TCP وUDP 3478 وTCP/UDP relay range 30000–30010، وراجع 7880/7881/7882 عند direct ICE. لا تستخدم عنواناً
+  افتراضياً من شبكة أخرى.
+- **health timeout:** زد `WATCH_WITH_ME_TIMEOUT=240`، ثم `status` و`logs postgres`
+  و`redis` و`minio` و`livekit` و`coturn` و`media-worker` و`realtime` و`web`. لا تحذف
+  volumes لمجرد timeout.
+- **3000/4000 مشغولان:** `doctor` يحذر ولا يقتل processes؛ أوقف dev أو containers
+  القديمة، ثم `status`. لا تستخدم `clean` لحل تعارض منفذ.
+- **LiveKit لا يتصل:** راجع `LIVEKIT_NODE_IP`, `DOCKER_HOST_NETWORK_IP`, `TURN_SHARED_SECRET`
+  والسجلات. في الوضع الافتراضي relay-only يجب أن يظهر `connectionType=relay` في
+  Chrome WebRTC/LiveKit stats؛ لا تسجل tokens أو credentials.
+- **الكاميرا/الميكروفون/الشاشة:** امنح browser permission، استخدم HTTPS أو localhost،
+  تحقق من أن المضيف فعّل المؤتمر ومن grants؛ صوت النظام يعتمد على دعم المتصفح/OS.
+- **رفع يفشل:** تحقق من MIME والامتداد والحجم ≤2GB، صحة MinIO و`media-worker`، ثم
+  `logs media-worker`. مدة المعالجة محدودة بـ`MEDIA_JOB_TIMEOUT_MS`، وTS يحتاج FFmpeg.
+- **الترجمة مرفوضة:** استخدم header `WEBVTT` لـVTT أو timestamps صحيحة لـSRT؛ أبقِها
+  ≤20MB لأن `media-worker` يرفض الأكبر بعد الرفع/التنزيل، ولا تستخدم HTML/URLs. لا
+  تخلط MIME الامتداد.
+- **YouTube لا يعمل:** YouTube يدعم full-sync للمضيف فقط إذا سمح الفيديو بالتضمين؛ جرّب
+  فيديو آخر، واعتبر قيود العمر/المنطقة/embed من المزود خارج سيطرة التطبيق.
+- **موصل اجتماعي لا يعمل:** موصلات Instagram وTikTok وVimeo وDailymotion وTwitch وFacebook
+  تجريبية view-only ولا تضمن تشغيل الرابط أو الفيديو المحدد أو full sync.
+- **PowerShell execution policy:** استخدم `-Scope Process` و`Unblock-File` أعلاه فقط.
+- **Bash permission denied أو WSL:** `chmod +x scripts/watch-with-me.sh`، ثم تحقق من
+  daemon والـfilesystem؛ شغّل Bash عبر Git Bash/WSL المناسب لا shell غير متوافق.
 
-على Windows:
+## الإيقاف والتنظيف
 
-```powershell
-.\scripts\watch-with-me.ps1 doctor
-```
+- `stop`: إيقاف مؤقت، يبقي containers وvolumes.
+- `remove`: يحذف containers/networks/orphans، ويبقي PostgreSQL/Redis/MinIO volumes.
+- `clean` أو `clean --yes`: يحذف containers/networks وvolumes؛ يمسح بيانات PostgreSQL
+  وRedis وMinIO نهائياً ولا يمكن التراجع عنه. خذ نسخة احتياطية وتحقق من المشروع قبل
+  تأكيد `DELETE` أو استعمال `--yes`. لا يحذف images/cache.
 
-سيحذر `doctor` إذا كان المنفذ منشوراً من حاوية أو مشغولاً من process على الجهاز، لكنه
-لا يقتل أي process. افحص `status` و`logs web` و`logs realtime` بعد ذلك.
+## الأمان والخصوصية والإتاحة وSEO
 
-## الاختبارات
+- استخدم TLS وsecrets manager وfirewall وTURN credentials قصيرة العمر في الإنتاج؛
+  `ALLOW_INSECURE_LOCAL_MEDIA=true` وبيانات MinIO الافتراضية للتطوير المحلي فقط.
+- presigned upload/playback، التحقق من MIME/extension/size، ffprobe، تنظيف chat وTTL
+  تقلل المخاطر لكنها ليست بديلاً عن عزل التخزين والـrate limiting والمراقبة.
+- لا تسجل access tokens أو URLs الموقعة أو مفاتيح LiveKit/TURN. راجع سياسة الاحتفاظ:
+  chat/assets/subtitles مؤقتة، وvolumes الدائمة تحتاج حذفاً مقصوداً.
+- الواجهة تستخدم labels وARIA live/log وkeyboard-friendly controls وحالات alert؛
+  اختبر التركيز، captions، إذن الأجهزة، contrast، وscreen reader قبل التغيير.
+- Next يوفّر `sitemap` و`robots` وmetadata؛ حافظ على عناوين صفحات فريدة، روابط دعوة
+  غير مفهرسة عند اللزوم، وHTTPS/canonical وalt/labels. لا تكشف رموز الغرف أو بيانات
+  المشاركين في صفحات عامة.
+- سجل الاستثناءات المؤقتة ومراجعتها في
+  [`docs/security-exceptions.md`](docs/security-exceptions.md)، وتنتهي/تُراجع في
+  **2026-12-16**؛ لا تستخدم `npm audit fix --force` أو ترقية major دون مراجعة.
 
-`test` في كلا scriptَي التشغيل (PowerShell وBash) هو أمر Docker E2E الحقيقي من طرف إلى
-طرف؛ فهو ينتظر أن تكون خدمات Compose سليمة ثم يستدعي حرفياً
-`npm --prefix <root> run test:e2e:docker` (أي `npm run test:e2e:docker` من جذر المشروع). هذا
-المفتاح موجود حالياً ويشغّل Playwright Chromium بإعداد Docker على
-`http://localhost:3000` (وهو الـdefault بسبب تطابق الـorigin؛ لا تستبدله تلقائياً بـ
-`127.0.0.1` للاختبار)، ويختبر فعلياً مستخدم host ومستخدم viewer مستقلين: إنشاء الغرفة،
-رابط الدعوة، تحميل فيديو YouTube ذي المعرّف `3QM6MvvGwTg`، ثم مزامنة التشغيل والإيقاف
-والتقديم (`play`/`pause`/`seek`). يسجل Playwright trace/video عند الفشل؛ وإذا تعذر
-YouTube أو الـiframe بسبب الاعتماد الخارجي، ينجح الاختبار في فحوص مزامنة حالة التطبيق
-ثم يتخطى فحص الـembed برسالة توضح السبب. لذلك لا يضمن الاختبار توفر YouTube دائماً.
+## قائمة نشر
 
-لتشغيله مباشرة بعد `start`:
-
-```powershell
-.\scripts\watch-with-me.ps1 test
-```
-
-```bash
-./scripts/watch-with-me.sh test
-```
-
-للاختبارات الموجودة حالياً:
-
-```bash
-npm run lint
-npm run typecheck
-npm test
-npm run test:e2e
-npm run build
-```
-
-## Troubleshooting
-
-- **Docker CLI/daemon unavailable**: شغّل Docker Desktop (أو Docker Engine على Linux)،
-  ثم أعد `doctor`.
-- **Compose invalid/unavailable**: نفّذ `docker compose config` وتحقق من أنك في جذر
-  المشروع وأن `docker-compose.yml` موجود.
-- **الخدمات لا تصبح healthy**: نفّذ `status` ثم `logs postgres`, `logs redis`,
-  `logs realtime`, و`logs web`. يمكن زيادة المهلة، مثلاً `WATCH_WITH_ME_TIMEOUT=240`.
-- **المنفذ مستخدم**: اتبع فحص `doctor` أعلاه، وأوقف التطبيق المحلي أو الحاويات القديمة؛
-  لا تحذف volumes لحل تعارض منفذ.
-- **PowerShell execution policy**: استخدم إعداد `-Scope Process` و`Unblock-File` أعلاه،
-  وليس `Bypass` دائمًا.
-- **Linux permission denied**: نفّذ `chmod +x scripts/watch-with-me.sh` ثم أعد الأمر.
-- **YouTube لا يعمل**: تحقّق من رابط HTTPS ومن السماح بالتضمين؛ قيود المالك لا تُحل
-  بإعادة بناء Docker.
-
-لحذف كل بيانات البيئة عمداً، راجع الحالة أولاً، ثم نفّذ الأمر المناسب وأكّد المخاطر:
-
-```bash
-./scripts/watch-with-me.sh status
-./scripts/watch-with-me.sh clean
-# اكتب DELETE حرفياً عند الطلب
-```
-
-أو استخدم `clean --yes` فقط بعد أخذ نسخة احتياطية والتأكد من أنك تريد حذف PostgreSQL
-وRedis volumes نهائياً.
+- [ ] استبدال كل مفاتيح development وتدويرها، وتفعيل TLS وsecure origins.
+- [ ] تعطيل `ALLOW_INSECURE_LOCAL_MEDIA`، وضبط CORS/origins وقواعد firewall وTURN/NAT.
+- [ ] عدم تعريض PostgreSQL/Redis/MinIO console للإنترنت؛ عزل object storage وتفعيل
+  retention/backup ومراقبة worker.
+- [ ] تثبيت ومراجعة images/dependencies، تشغيل lint/typecheck/unit/build وLocal E2E
+  وDocker E2E وQA المطلوبة؛ لا اعتبار `test:all` بوابة Docker.
+- [ ] اختبار host transfer، view-only، moderation، uploads/FFmpeg/VTT/SRT، grants،
+  screen/system audio، accessibility، المتصفحات والشبكات الفعلية.
+- [ ] مراجعة `docs/security-exceptions.md` قبل **2026-12-16** أو عند ظهور trigger،
+  وتوثيق قرار كل استثناء قبل الإطلاق.

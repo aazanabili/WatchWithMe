@@ -1,4 +1,4 @@
-import { describe, expect, it, afterAll } from 'vitest';
+import { describe, expect, it, afterAll, vi } from 'vitest';
 import { io as connect, type Socket } from 'socket.io-client';
 import {
   httpServer,
@@ -8,6 +8,7 @@ import {
   RoomService,
   type Room,
   type RoomRepository,
+  liveKitRoomService,
 } from './index';
 import { ServerEvent } from '@watch-with-me/contracts';
 
@@ -87,7 +88,7 @@ describe('realtime MVP integration', async () => {
     const command = {
       version: 'v1',
       commandId: 'host-1',
-      command: { type: 'load', provider: 'youtube', videoId: 'dQw4w9WgXcQ' },
+      command: { type: 'load', provider: 'youtube', videoId: 'dQw4w9WgXcQ', durationSeconds: null },
     };
     host.emit('command', command);
     expect(((await changed) as { data: { videoId: string } }).data.videoId).toBe('dQw4w9WgXcQ');
@@ -114,6 +115,138 @@ describe('realtime MVP integration', async () => {
     expect(((await duplicate) as { data: { sequence: number } }).data.sequence).toBeGreaterThan(0);
     host.close();
     viewer.close();
+  });
+
+  it('persists conference enablement before broadcasting and allows an immediate viewer token request', async () => {
+    const created = await fetch(`${address}/api/rooms`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'Conference host' }),
+    }).then((r) => r.json());
+    const joined = await fetch(`${address}/api/rooms/${created.roomCode}/join`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'Conference viewer' }),
+    }).then((r) => r.json());
+    const host = connect(address, { auth: { roomCode: created.roomCode, token: created.token } });
+    const viewer = connect(address, { auth: { roomCode: created.roomCode, token: joined.token } });
+    await Promise.all([waitFor(host, 'snapshot'), waitFor(viewer, 'snapshot')]);
+
+    const persistedAtEvent = new Promise<boolean>((resolve) => {
+      const handler = async (value: unknown) => {
+        if (!(value as { enabled?: boolean }).enabled) return;
+        viewer.off('conference.policy.changed', handler);
+        expect(value).toMatchObject({ enabled: true });
+        resolve((await rooms.get(created.roomCode))?.conferenceEnabled === true);
+      };
+      viewer.on('conference.policy.changed', handler);
+    });
+    const ack = new Promise<unknown>((resolve) => host.emit('conference.policy.changed', { enabled: true }, resolve));
+    expect(await persistedAtEvent).toBe(true);
+    expect(await ack).toMatchObject({ ok: true, enabled: true });
+
+    const tokenResponse = await fetch(`${address}/api/rooms/${created.roomCode}/conference/token`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${joined.token}` },
+    });
+    // TURN may be intentionally absent in unit runs, but policy must no
+    // longer reject a viewer after the enabled event was delivered.
+    expect(tokenResponse.status).not.toBe(403);
+    host.close();
+    viewer.close();
+  });
+
+  it('rejects a viewer conference policy mutation without changing durable state', async () => {
+    const created = await fetch(`${address}/api/rooms`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'Policy host' }),
+    }).then((r) => r.json());
+    const joined = await fetch(`${address}/api/rooms/${created.roomCode}/join`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'Policy viewer' }),
+    }).then((r) => r.json());
+    const viewer = connect(address, { auth: { roomCode: created.roomCode, token: joined.token } });
+    await waitFor(viewer, 'snapshot');
+    const result = await new Promise<unknown>((resolve) => viewer.emit('conference.policy.changed', { enabled: true }, resolve));
+    expect(result).toEqual({ error: 'forbidden' });
+    expect((await rooms.get(created.roomCode))?.conferenceEnabled).toBe(false);
+    viewer.close();
+  });
+
+  it('shares LiveKit revoke/mute enforcement across HTTP and socket, preserving subscription', async () => {
+    const created = await fetch(`${address}/api/rooms`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'Grant host' }),
+    }).then((r) => r.json());
+    const joined = await fetch(`${address}/api/rooms/${created.roomCode}/join`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'Grant viewer' }),
+    }).then((r) => r.json());
+    const host = connect(address, { auth: { roomCode: created.roomCode, token: created.token } });
+    const viewer = connect(address, { auth: { roomCode: created.roomCode, token: joined.token } });
+    await Promise.all([waitFor(host, 'snapshot'), waitFor(viewer, 'snapshot')]);
+    const update = vi.spyOn(liveKitRoomService, 'updateParticipant');
+
+    const granted = await fetch(`${address}/api/rooms/${created.roomCode}/conference/grant`, {
+      method: 'POST', headers: { Authorization: `Bearer ${created.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ participantId: joined.participantId }),
+    });
+    expect(granted.status).toBe(200);
+
+    const revokeEvent = new Promise<unknown>((resolve) => viewer.on('conference.grants', function handler(value: unknown) {
+      const grant = value as { participantId?: string; canPublishAudio?: boolean };
+      if (grant.participantId === joined.participantId && grant.canPublishAudio === false) {
+        viewer.off('conference.grants', handler);
+        resolve(value);
+      }
+    }));
+    const revoked = await fetch(`${address}/api/rooms/${created.roomCode}/conference/revoke`, {
+      method: 'POST', headers: { Authorization: `Bearer ${created.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ participantId: joined.participantId }),
+    });
+    expect(revoked.status).toBe(204);
+    expect(await revokeEvent).toMatchObject({ participantId: joined.participantId, canPublishAudio: false, canPublishVideo: false, canPublishScreen: false, canSubscribe: true });
+    expect(update).toHaveBeenLastCalledWith(created.roomCode, joined.participantId, { canPublishAudio: false, canPublishVideo: false, canPublishScreen: false, canSubscribe: true });
+
+    const muteEvent = new Promise<unknown>((resolve) => viewer.on('conference.grants', function handler(value: unknown) {
+      const grant = value as { participantId?: string; canPublishAudio?: boolean };
+      if (grant.participantId === joined.participantId && grant.canPublishAudio === false) {
+        viewer.off('conference.grants', handler);
+        resolve(value);
+      }
+    }));
+    const muted = await new Promise<unknown>((resolve) => host.emit('moderation.mute', { participantId: joined.participantId }, resolve));
+    expect(muted).toEqual({ ok: true });
+    expect(await muteEvent).toMatchObject({ participantId: joined.participantId, canSubscribe: true });
+
+    const unauthorized = await fetch(`${address}/api/rooms/${created.roomCode}/conference/revoke`, {
+      method: 'POST', headers: { Authorization: `Bearer ${joined.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ participantId: created.participantId }),
+    });
+    expect(unauthorized.status).toBe(403);
+    update.mockRestore();
+    host.close();
+    viewer.close();
+  });
+
+  it('does not acknowledge revoke when LiveKit permission sync fails', async () => {
+    const created = await fetch(`${address}/api/rooms`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'Failure host' }),
+    }).then((r) => r.json());
+    const joined = await fetch(`${address}/api/rooms/${created.roomCode}/join`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'Failure viewer' }),
+    }).then((r) => r.json());
+    const host = connect(address, { auth: { roomCode: created.roomCode, token: created.token } });
+    await waitFor(host, 'snapshot');
+    const update = vi.spyOn(liveKitRoomService, 'updateParticipant').mockRejectedValueOnce(new Error('offline'));
+    const ack = await new Promise<unknown>((resolve) => host.emit('conference.revoke', { participantId: joined.participantId }, resolve));
+    expect(ack).toEqual({ error: 'livekit_sync_failed' });
+    update.mockRestore();
+    host.close();
   });
 
   it('can reconnect with the same capability and receives a snapshot', async () => {
@@ -151,7 +284,7 @@ describe('realtime MVP integration', async () => {
     first.emit('command', {
       version: 'v1',
       commandId: 'multi-load',
-      command: { type: 'load', provider: 'youtube', videoId: 'dQw4w9WgXcQ' },
+      command: { type: 'load', provider: 'youtube', videoId: 'dQw4w9WgXcQ', durationSeconds: null },
     });
     await loaded;
     const playing = waitFor(first, 'playback_changed');
@@ -191,6 +324,7 @@ describe('realtime MVP integration', async () => {
           videoId: 'dQw4w9WgXcQ',
           status: 'paused',
           positionSeconds: 0,
+          durationSeconds: null,
           updatedAt: new Date().toISOString(),
           revision: room.revision + 1,
         };

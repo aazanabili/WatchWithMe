@@ -19,9 +19,27 @@ enum ParticipantRole {
 }
 
 enum MediaProvider {
-  YOUTUBE
-  VIMEO
-  CUSTOM
+  YOUTUBE @map("youtube")
+  UPLOAD @map("upload")
+  MP4 @map("mp4")
+  INSTAGRAM @map("instagram")
+  TIKTOK @map("tiktok")
+  VIMEO @map("vimeo")
+  DAILYMOTION @map("dailymotion")
+  TWITCH @map("twitch")
+  FACEBOOK @map("facebook")
+}
+
+enum SyncMode {
+  FULL @map("full")
+  VIEW_ONLY @map("view_only")
+}
+enum SubtitleFormat {
+  VTT @map("vtt")
+  SRT @map("srt")
+}
+enum HostTransferPolicy {
+  AUTO_TRANSFER_OLDEST @map("auto_transfer_oldest")
 }
 
 model Room {
@@ -29,6 +47,9 @@ model Room {
   hostParticipantId String?             @unique
   status            RoomStatus         @default(ACTIVE)
   expiresAt         DateTime
+  hostTransferPolicy HostTransferPolicy   @default(AUTO_TRANSFER_OLDEST)
+  conferenceEnabled Boolean             @default(false)
+  conferenceMaxParticipants Int?
   createdAt         DateTime             @default(now())
   updatedAt         DateTime             @updatedAt
   sequence          Int                 @default(0)
@@ -37,6 +58,7 @@ model Room {
   participants      Participant[]       @relation("RoomParticipants")
   playbackSnapshot  PlaybackSnapshot?
   idempotencyKeys   IdempotencyKey[]
+  mediaAssets       MediaAsset[]
 
   @@index([status, expiresAt])
   @@index([expiresAt])
@@ -52,6 +74,9 @@ model Participant {
   updatedAt   DateTime  @updatedAt
   tokenHash   String
   online      Boolean   @default(false)
+  revokedAt   DateTime?
+  permissions Json?
+  joinOrder   Int       @default(0)
   room        Room      @relation("RoomParticipants", fields: [roomId], references: [id], onDelete: Cascade)
   hostedRoom  Room?     @relation("RoomHost")
 
@@ -70,9 +95,36 @@ model PlaybackSnapshot {
   revision   Int      @default(0)
   capturedAt DateTime @default(now())
   updatedAt  DateTime @updatedAt
+  durationSeconds Float?
+  syncMode SyncMode @default(FULL)
   room       Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
 
   @@index([roomId, version])
+}
+
+model MediaAsset {
+  id          String   @id
+  objectKey   String   @unique
+  contentType String
+  sizeBytes   BigInt
+  durationSeconds Float?
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+  roomId      String?
+  room        Room? @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  subtitles   SubtitleTrack[]
+  @@index([expiresAt])
+}
+
+model SubtitleTrack {
+  id        String @id
+  assetId   String
+  language  String
+  format    SubtitleFormat
+  objectKey String
+  status    String   @default("PENDING")
+  asset     MediaAsset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  @@unique([assetId, language])
 }
 
 model IdempotencyKey {
