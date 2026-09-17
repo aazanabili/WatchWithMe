@@ -366,6 +366,8 @@ h1 em {
   gap: 10px;
   align-items: center;
   margin-top: 12px;
+  flex-wrap: wrap;
+  direction: rtl;
 }
 .controls button {
   min-width: 50px;
@@ -563,5 +565,76 @@ button:disabled {
   }
   .room-shell {
     padding-inline: 12px;
+  }
+}
+@media (min-width: 321px) and (max-width: 768px) {
+  .room-grid {
+    grid-template-columns: 1fr;
+  }
+  .room-side {
+    order: 2;
+  }
+}
+.controls input[type='range'] {
+  accent-color: var(--lime);
+  min-width: 110px;
+}
+.controls input[type='range']:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.conference-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+  margin: 14px 0;
+}
+.conference-tile {
+  min-height: 72px;
+  padding: 12px;
+  background: #101111;
+  border: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  justify-content: space-between;
+}
+.conference-tile button {
+  min-height: 36px;
+}
+.conference-panel button,
+.conference-panel input,
+.conference-panel select,
+.chat-panel textarea,
+.chat-panel button,
+.upload-panel input,
+.subtitle-panel input {
+  max-width: 100%;
+}
+.chat-panel textarea {
+  width: 100%;
+  min-height: 76px;
+  resize: vertical;
+  background: #101111;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  padding: 10px;
+}
+.conference-grid {
+  min-width: 0;
+}
+@media (max-width: 375px) {
+  .room-nav .status {
+    font-size: 9px;
+  }
+  .controls {
+    gap: 6px;
+  }
+  .controls input[type='range'] {
+    min-width: 90px;
+    max-width: 100%;
+  }
+  .room-side {
+    padding: 14px;
   }
 }

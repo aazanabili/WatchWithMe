@@ -7,12 +7,39 @@ describe('v1 contracts', () => {
       type: 'seek',
       positionSeconds: 12,
     });
-    const load = Command.parse({ type: 'load', provider: 'youtube', videoId: 'abc' });
+    const load = Command.parse({
+      type: 'load',
+      provider: 'youtube',
+      videoId: 'abc',
+      durationSeconds: null,
+    });
     expect(load).toMatchObject({ type: 'load', provider: 'youtube' });
   });
 
-  it('rejects unsupported providers', () => {
-    expect(() => Command.parse({ type: 'load', provider: 'vimeo', videoId: 'abc' })).toThrow();
+  it('accepts every registered provider with explicit sync mode', () => {
+    for (const provider of [
+      'youtube',
+      'mp4',
+      'upload',
+      'instagram',
+      'tiktok',
+      'vimeo',
+      'dailymotion',
+      'twitch',
+      'facebook',
+    ]) {
+      const value = Command.parse({
+        type: 'load',
+        provider,
+        videoId: provider === 'youtube' ? 'abc' : `https://${provider}.com/video/abc`,
+        durationSeconds: null,
+        syncMode:
+          provider === 'youtube' || provider === 'mp4' || provider === 'upload'
+            ? 'full'
+            : 'view_only',
+      });
+      expect(value).toMatchObject({ type: 'load', provider });
+    }
   });
 
   it('requires snapshot protocol metadata', () => {

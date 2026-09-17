@@ -189,6 +189,22 @@ npm run build
 - **YouTube لا يعمل**: تحقّق من رابط HTTPS ومن السماح بالتضمين؛ قيود المالك لا تُحل
   بإعادة بناء Docker.
 
+### LiveKit ICE وTURN محلياً
+
+يعمل LiveKit في Compose مع coturn منفصل على شبكة `backend` ثابتة (`172.28.0.0/24`؛
+LiveKit=`172.28.0.10` وcoturn=`172.28.0.11`)، بينما يبقى signaling
+على `127.0.0.1:7880`. يُنشر `7881/tcp` و`7882/udp` لـLiveKit، ويُنشر coturn فقط
+على `3478/tcp` للمتصفح. يستخدم coturn REST auth عبر `TURN_SHARED_SECRET` ونطاق
+relay داخلياً محدوداً `30000-30010`; لا يستخدم LiveKit الـembedded TURN.
+يصل المتصفح إلى `turn:localhost:3478?transport=tcp`، ويحصل على credentials
+قصيرة العمر من realtime بعد إصدار access token. لا تُسجّل credentials ولا تُضمّن
+في إعدادات ثابتة.
+
+إذا فشل الاتصال، شغّل `doctor` ثم تحقق من سجل `coturn` و`livekit` ومن أن
+coturn يملك عنواناً واحداً على شبكة `backend`. الإثبات النهائي يكون من Chrome
+عبر `RTCPeerConnection`/LiveKit stats، حيث يجب أن تكون `connectionType` هي
+`relay` عند استخدام relay-only.
+
 لحذف كل بيانات البيئة عمداً، راجع الحالة أولاً، ثم نفّذ الأمر المناسب وأكّد المخاطر:
 
 ```bash

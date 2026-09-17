@@ -1,0 +1,68 @@
+'use client';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Room, RoomEvent, Track, type RemoteTrack, type RemoteTrackPublication, type RemoteParticipant, type LocalTrackPublication } from 'livekit-client';
+
+type Participant = { id: string; role: 'host' | 'viewer'; displayName?: string };
+type Grant = { participantId?: string; enabled?: boolean; ownGrant?: Permissions; canPublishAudio?: boolean; canPublishVideo?: boolean; canPublishScreen?: boolean; canSubscribe?: boolean };
+type Permissions = { canPublishAudio: boolean; canPublishVideo: boolean; canPublishScreen: boolean; canSubscribe: boolean };
+type SocketLike = { on: (event: string, cb: (value: unknown) => void) => void; off: (event: string, cb: (value: unknown) => void) => void; emit: (event: string, body: unknown, ack?: (value: unknown) => void) => void };
+type Tile = { id: string; participantId: string; name: string; track: RemoteTrack | LocalTrackPublication['track']; kind: 'video' | 'audio'; local: boolean };
+export const conferenceTokenHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' });
+export const limitConferenceTiles = <T,>(tiles: T[], max = 6) => tiles.slice(0, max);
+export const livekitUrl = () => (typeof window !== 'undefined' && (window as Window & { __WATCH_WITH_ME_LIVEKIT_URL?: string }).__WATCH_WITH_ME_LIVEKIT_URL) || process.env.NEXT_PUBLIC_LIVEKIT_URL || '';
+export const livekitErrorReason = (error: unknown, production = false) => { const message = error instanceof Error ? error.message : 'unknown error'; return !production && (process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test') ? `LiveKit: ${message}` : 'تعذر الاتصال بـ LiveKit.'; };
+export const shouldApplyConferenceStatus = (requestGeneration: number, latestGeneration: number) => requestGeneration === latestGeneration;
+
+function TrackView({ tile, muted }: { tile: Tile; muted: boolean }) {
+  const ref = useRef<HTMLVideoElement & HTMLAudioElement>(null);
+  useEffect(() => {
+    const element = ref.current; const track = tile.track;
+    if (!element || !track) return;
+    track.attach(element); if ('muted' in element) element.muted = muted;
+    return () => { track.detach(element); };
+  }, [tile.track, muted]);
+  return tile.kind === 'video' ? <video ref={ref} autoPlay playsInline aria-label={tile.name} /> : <audio ref={ref} autoPlay aria-label={tile.name} />;
+}
+
+export function ConferencePanel({ socket, tokenUrl, token, currentParticipant, participants }: {
+  socket: SocketLike | null; tokenUrl: string; token: string; currentParticipant: Participant | null; participants: Participant[];
+}) {
+  const isHost = currentParticipant?.role === 'host'; const selfId = currentParticipant?.id;
+  const roomRef = useRef<Room | null>(null); const tracksRef = useRef(new Map<string, Tile>());
+  const statusGeneration = useRef(0); const statusAbort = useRef<AbortController | null>(null);
+  const [connected, setConnected] = useState(false); const [permissions, setPermissions] = useState<Permissions>({ canPublishAudio: Boolean(isHost), canPublishVideo: Boolean(isHost), canPublishScreen: Boolean(isHost), canSubscribe: Boolean(isHost) }); const [policy, setPolicy] = useState(false);
+  const [tiles, setTiles] = useState<Tile[]>([]); const [remoteMuted, setRemoteMuted] = useState<Set<string>>(new Set()); const [error, setError] = useState(''); const [status, setStatus] = useState('');
+  const [mic, setMic] = useState(false); const [camera, setCamera] = useState(false); const [screen, setScreen] = useState(false); const [systemAudio, setSystemAudio] = useState(false);
+  const updateTiles = useCallback(() => setTiles(Array.from(tracksRef.current.values()).slice(0, 12)), []);
+  const removeParticipantTracks = useCallback((participantId: string) => { for (const [id, tile] of tracksRef.current) if (tile.participantId === participantId) tracksRef.current.delete(id); updateTiles(); }, [updateTiles]);
+  const cleanup = useCallback(async () => { const room = roomRef.current; if (!room) return; for (const publication of room.localParticipant.trackPublications.values()) { if (publication.track) { try { await room.localParticipant.unpublishTrack(publication.track); } catch { /* already unpublished */ } publication.track.stop(); publication.track.detach(); } } for (const tile of tracksRef.current.values()) tile.track?.detach(); tracksRef.current.clear(); await room.disconnect(); roomRef.current = null; setTiles([]); setConnected(false); setMic(false); setCamera(false); setScreen(false); }, []);
+
+  useEffect(() => {
+    if (!socket) return; const onGrant = (value: unknown) => { statusGeneration.current++; const grant = value as Grant; if (grant.participantId === selfId) { const next = { canPublishAudio: grant.canPublishAudio === true, canPublishVideo: grant.canPublishVideo === true, canPublishScreen: grant.canPublishScreen === true, canSubscribe: grant.canSubscribe !== false }; setPermissions(next); setPolicy(true); if (!next.canPublishAudio && !next.canPublishVideo && !next.canPublishScreen) void cleanupPublished(); } }; const onPolicy = (value: unknown) => { statusGeneration.current++; const state = value as Grant; if (typeof state.enabled === 'boolean') { setPolicy(state.enabled); if (state.enabled && !isHost) setStatus('يمكنك الانضمام إلى المؤتمر الآن.'); } if (state.ownGrant) setPermissions(state.ownGrant); };
+    socket.on('conference.grants', onGrant); socket.on('conference.policy.changed', onPolicy); return () => { socket.off('conference.grants', onGrant); socket.off('conference.policy.changed', onPolicy); void cleanup(); };
+  }, [socket, selfId, cleanup]);
+  const cleanupPublished = async () => { const room = roomRef.current; if (!room) return; await room.localParticipant.setMicrophoneEnabled(false); await room.localParticipant.setCameraEnabled(false); await room.localParticipant.setScreenShareEnabled(false); setMic(false); setCamera(false); setScreen(false); };
+  useEffect(() => { if (!tokenUrl || !token) return; statusAbort.current?.abort(); const abort = new AbortController(); statusAbort.current = abort; const requestGeneration = statusGeneration.current; const statusUrl = tokenUrl.replace(/\/token$/, '/status'); void fetch(statusUrl, { headers: conferenceTokenHeaders(token), signal: abort.signal }).then(r => r.ok ? r.json() : null).then((value: Grant | null) => { if (!value || abort.signal.aborted || !shouldApplyConferenceStatus(requestGeneration, statusGeneration.current)) return; setPolicy(value.enabled === true); if (value.ownGrant) setPermissions(value.ownGrant); }).catch(() => undefined); return () => abort.abort(); }, [tokenUrl, token, socket, isHost]);
+  const addTrack = useCallback((track: RemoteTrack | LocalTrackPublication['track'], participantId: string, name: string, local: boolean) => { if (!track) return; const kind = track.kind === Track.Kind.Video ? 'video' : 'audio'; const tile = { id: `${participantId}:${track.sid ?? track.kind}`, participantId, name, track, kind, local } as Tile; tracksRef.current.set(tile.id, tile); updateTiles(); }, [updateTiles]);
+  const connect = async () => {
+    if (!isHost && !policy) { setError('لم يفعّل المضيف المؤتمر بعد.'); return; }
+     try { setError(''); const response = await fetch(tokenUrl, { method: 'POST', headers: conferenceTokenHeaders(token) }); if (!response.ok) throw new Error('token'); const data = await response.json() as { token?: string; iceServers?: RTCIceServer[] }; if (!data.token) throw new Error('token'); const relayOnly = process.env.NEXT_PUBLIC_LIVEKIT_RELAY_ONLY === 'true'; const room = new Room({ adaptiveStream: true, dynacast: true });
+      room.on(RoomEvent.TrackSubscribed, (track: RemoteTrack, _publication: RemoteTrackPublication, participant: RemoteParticipant) => addTrack(track, participant.identity, participant.name || participant.identity, false));
+      room.on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack, _publication: RemoteTrackPublication, participant: RemoteParticipant) => { track.detach(); for (const [id, tile] of tracksRef.current) if (tile.track === track || tile.participantId === participant.identity && tile.track === track) tracksRef.current.delete(id); updateTiles(); });
+      room.on(RoomEvent.ParticipantDisconnected, (participant: RemoteParticipant) => removeParticipantTracks(participant.identity));
+      room.on(RoomEvent.LocalTrackPublished, (publication: LocalTrackPublication) => addTrack(publication.track, room.localParticipant.identity, 'أنت', true));
+      room.on(RoomEvent.LocalTrackUnpublished, (publication: LocalTrackPublication) => { publication.track?.detach(); for (const [id, tile] of tracksRef.current) if (tile.track === publication.track) tracksRef.current.delete(id); updateTiles(); });
+      room.on(RoomEvent.ParticipantConnected, updateTiles); room.on(RoomEvent.Disconnected, () => { setConnected(false); setStatus('انقطع اتصال LiveKit'); });
+       const url = livekitUrl(); if (!url) throw new Error('missing LiveKit URL'); await room.connect(url, data.token, { rtcConfig: { iceTransportPolicy: relayOnly ? 'relay' : 'all', iceServers: data.iceServers ?? [] } }); roomRef.current = room; setConnected(true); setStatus('تم الاتصال');
+    } catch (reason) { setError(livekitErrorReason(reason)); }
+  };
+  const toggleMic = async () => { if (!roomRef.current) return; try { await roomRef.current.localParticipant.setMicrophoneEnabled(!mic); setMic(!mic); } catch { setError('تعذر الوصول إلى الميكروفون.'); } };
+  const toggleCamera = async () => { if (!roomRef.current) return; try { await roomRef.current.localParticipant.setCameraEnabled(!camera); setCamera(!camera); } catch { setError('تعذر الوصول إلى الكاميرا.'); } };
+  const toggleScreen = async () => { if (!roomRef.current) return; const next = !screen; setScreen(next); try { await roomRef.current.localParticipant.setScreenShareEnabled(next, { audio: systemAudio }); } catch { if (!screen && systemAudio) { try { await roomRef.current.localParticipant.setScreenShareEnabled(true, { audio: false }); return; } catch { /* report below */ } } setScreen(false); setError('تعذرت مشاركة الشاشة أو صوت النظام.'); } };
+  const command = (event: string, participantId: string, confirmText: string, extra: Record<string, unknown> = {}) => { if (!socket || !window.confirm(confirmText)) return; socket.emit(event, { participantId, ...extra }, value => { if ((value as { error?: string })?.error) setError(`تعذر تنفيذ العملية: ${(value as { error: string }).error}`); else setStatus('تم تنفيذ العملية'); }); };
+  return <section className="conference-panel" aria-label="الفيديو الجماعي"><h2>الفيديو الجماعي <small>LiveKit · {Math.min(6, new Set(tiles.map(t => t.participantId)).size)}/6</small></h2><p className="live-note">لا تُطلب صلاحيات الأجهزة قبل النقر. موافقة المضيف تمنحك القدرة فقط؛ لا يمكن تشغيل جهاز مشارك آخر قسراً.</p>{error && <p role="alert" className="error">{error}</p>}{status && <p role="status" aria-live="polite">{status}</p>}
+      {isHost && <label><input type="checkbox" checked={policy} onChange={e => { const value = e.target.checked; const previous = policy; setPolicy(value); statusGeneration.current++; socket?.emit('conference.policy.changed', { enabled: value }, v => { if ((v as { error?: string })?.error) { setPolicy(previous); setError('تعذر تحديث سياسة المؤتمر؛ أُعيدت الحالة السابقة.'); } else setStatus('تم تحديث سياسة المؤتمر.'); }); }} /> تفعيل المؤتمر للمشاهدين</label>}
+     {!connected ? <button type="button" onClick={() => void connect()} disabled={!isHost && !policy}>انضمام إلى الفيديو</button> : <><div className="conference-grid" aria-label="مشاركو المؤتمر">{limitConferenceTiles(tiles).map(tile => <div className="conference-tile" key={tile.id}><TrackView tile={tile} muted={!tile.local && remoteMuted.has(tile.participantId)} /><span>{tile.name}</span>{!tile.local && tile.kind === 'video' && <button type="button" onClick={() => setRemoteMuted(old => { const next = new Set(old); if (next.has(tile.participantId)) next.delete(tile.participantId); else next.add(tile.participantId); return next; })}>{remoteMuted.has(tile.participantId) ? 'إلغاء الكتم المحلي' : 'كتم محلي'}</button>}</div>)}</div><button type="button" disabled={!permissions.canPublishAudio} onClick={() => void toggleMic()}>{mic ? 'كتم الميكروفون' : 'تشغيل الميكروفون'}</button><button type="button" disabled={!permissions.canPublishVideo} onClick={() => void toggleCamera()}>{camera ? 'إيقاف الكاميرا' : 'تشغيل الكاميرا'}</button><label><input type="checkbox" disabled={!permissions.canPublishScreen} checked={systemAudio} onChange={e => setSystemAudio(e.target.checked)} /> مشاركة صوت النظام</label><button type="button" disabled={!permissions.canPublishScreen} onClick={() => void toggleScreen()}>{screen ? 'إيقاف مشاركة الشاشة' : 'مشاركة الشاشة'}</button><button type="button" onClick={() => void cleanup()}>مغادرة الفيديو</button></>}
+    {isHost && <div className="participant-controls"><h3>صلاحيات المشاركين</h3>{participants.filter(p => p.role === 'viewer').map(p => <div key={p.id}><strong>{p.displayName || p.id}</strong><button type="button" onClick={() => command('conference.grant', p.id, `السماح لـ ${p.displayName || p.id}؟`, { canPublishScreen: policy })}>سماح</button><button type="button" onClick={() => command('conference.revoke', p.id, `سحب صلاحية ${p.displayName || p.id}؟`)}>سحب</button><button type="button" onClick={() => command('moderation.mute', p.id, `كتم ${p.displayName || p.id}؟`)}>كتم</button><button type="button" onClick={() => command('moderation.kick', p.id, `طرد ${p.displayName || p.id}؟`)}>طرد</button></div>)}</div>}
+  </section>;
+}

@@ -6,6 +6,10 @@ type YTPlayer = {
   pauseVideo: () => void;
   seekTo: (seconds: number, allowSeekAhead: boolean) => void;
   getCurrentTime: () => number;
+  getDuration: () => number;
+  mute: () => void;
+  unMute: () => void;
+  setVolume: (volume: number) => void;
   destroy: () => void;
 };
 type YTApi = {
@@ -45,6 +49,14 @@ export default function YouTubePlayer({
               seek: (s: number) => player?.seekTo(s, true),
               getPosition: () => player?.getCurrentTime() || 0,
               destroy: () => player?.destroy(),
+              getDuration: () => player?.getDuration() || null,
+              getBuffered: () => 0,
+              onDuration: () => () => undefined,
+              onReady: () => () => undefined,
+              setMuted: (muted: boolean) => (muted ? player?.mute() : player?.unMute()),
+              setVolume: (volume: number) => player?.setVolume(Math.round(volume * 100)),
+              setReadOnly: () => undefined,
+              capabilities: { canPlay: true, canSeek: true, canSync: true },
             }),
         },
       });

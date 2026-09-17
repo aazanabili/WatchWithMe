@@ -6,7 +6,8 @@ export default defineConfig({
   retries: process.env.CI ? 2 : 0,
   workers: 1,
   reporter: process.env.CI ? [['line'], ['html', { open: 'never' }]] : 'list',
-  use: { baseURL: 'http://127.0.0.1:3000', trace: 'retain-on-failure', video: 'retain-on-failure' },
+  preserveOutput: 'always',
+  use: { baseURL: 'http://127.0.0.1:3000', trace: 'off', video: 'retain-on-failure', screenshot: 'only-on-failure' },
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
     ...(process.env.PW_ALL_BROWSERS

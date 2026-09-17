@@ -87,7 +87,7 @@ describe('realtime MVP integration', async () => {
     const command = {
       version: 'v1',
       commandId: 'host-1',
-      command: { type: 'load', provider: 'youtube', videoId: 'dQw4w9WgXcQ' },
+      command: { type: 'load', provider: 'youtube', videoId: 'dQw4w9WgXcQ', durationSeconds: null },
     };
     host.emit('command', command);
     expect(((await changed) as { data: { videoId: string } }).data.videoId).toBe('dQw4w9WgXcQ');
@@ -151,7 +151,7 @@ describe('realtime MVP integration', async () => {
     first.emit('command', {
       version: 'v1',
       commandId: 'multi-load',
-      command: { type: 'load', provider: 'youtube', videoId: 'dQw4w9WgXcQ' },
+      command: { type: 'load', provider: 'youtube', videoId: 'dQw4w9WgXcQ', durationSeconds: null },
     });
     await loaded;
     const playing = waitFor(first, 'playback_changed');
@@ -191,6 +191,7 @@ describe('realtime MVP integration', async () => {
           videoId: 'dQw4w9WgXcQ',
           status: 'paused',
           positionSeconds: 0,
+          durationSeconds: null,
           updatedAt: new Date().toISOString(),
           revision: room.revision + 1,
         };

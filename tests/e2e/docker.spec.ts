@@ -124,7 +124,32 @@ test('Docker E2E: independent host/viewer YouTube synchronization', async ({
         message: 'Viewer must observe YouTube Pause state',
       })
       .toBe('paused');
-    await host.getByLabel('التقديم في الفيديو').fill('7');
+    const seek = host.getByLabel('التقديم في الفيديو');
+    const box = await seek.boundingBox();
+    expect(box, 'seek control must have a pointer target').not.toBeNull();
+    const max = Number(await seek.getAttribute('max'));
+    const ratio = Math.min(7 / max, 0.99);
+    const direction = await seek.evaluate((element) => getComputedStyle(element).direction);
+    const targetX = box!.x + box!.width * (direction === 'rtl' ? 1 - ratio : ratio);
+    const targetY = box!.y + box!.height / 2;
+    // Exercise the native range with one pointer gesture. Unlike fill(), this
+    // emits the browser input/change path and then commits on release/blur.
+    await host.mouse.move(targetX, targetY);
+    await host.mouse.down();
+    await host.mouse.up();
+    // Keyboard interaction supplies the exact 100ms steps after the pointer
+    // gesture (the page is RTL, so End is the zero position).
+    await seek.press('End');
+    const resetPosition = (await expect
+      .poll(async () => Math.round((await snapshot(viewer, roomId)).snapshot.positionSeconds), {
+        timeout: 15_000,
+        message: 'Viewer must observe the range reset before incremental seek',
+      })
+      .toBeLessThan(1)
+      .then(() => snapshot(viewer, roomId))).snapshot.positionSeconds;
+    const steps = Math.max(0, Math.round((7 - resetPosition) * 10));
+    for (let i = 0; i < steps; i += 1) await seek.press('ArrowLeft', { delay: 300 });
+    await seek.press('Tab');
     await expect
       .poll(async () => (await snapshot(viewer, roomId)).snapshot.positionSeconds, {
         timeout: 15_000,

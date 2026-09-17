@@ -42,12 +42,12 @@ describe('Prisma media provider mapping', () => {
 
   it.each([
     ['youtube', 'YOUTUBE'],
-    ['mp4', 'CUSTOM'],
+    ['mp4', 'MP4'],
   ] as const)('maps contract provider %s to persisted %s', (contract, persisted) => {
     expect(mapMediaProvider(contract as DomainMediaProvider)).toBe(persisted);
   });
 
-  it.each(['YOUTUBE', 'CUSTOM'] as const)(
+  it.each(['YOUTUBE', 'MP4'] as const)(
     'round-trips persisted snapshot provider %s',
     (persisted) => {
       expect(mapMediaProvider(mapMediaProvider(persisted))).toBe(persisted);
