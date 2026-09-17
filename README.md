@@ -191,11 +191,18 @@ npm run build
 
 ### LiveKit ICE وTURN محلياً
 
-يعمل LiveKit في Compose مع coturn منفصل على شبكة `backend` ثابتة (`172.28.0.0/24`؛
-LiveKit=`172.28.0.10` وcoturn=`172.28.0.11`)، بينما يبقى signaling
-على `127.0.0.1:7880`. يُنشر `7881/tcp` و`7882/udp` لـLiveKit، ويُنشر coturn فقط
-على `3478/tcp` للمتصفح. يستخدم coturn REST auth عبر `TURN_SHARED_SECRET` ونطاق
-relay داخلياً محدوداً `30000-30010`; لا يستخدم LiveKit الـembedded TURN.
+يعمل LiveKit وcoturn في Compose باستخدام `network_mode: host`؛ يكتشف السكربت
+`LIVEKIT_NODE_IP` ويستخدمه LiveKit كعنوان LAN المعلن. يكتشف السكربت أيضاً
+`DOCKER_HOST_NETWORK_IP` من namespace الخاص بـDocker Desktop ويستخدمه coturn
+كـ`relay-ip` المحلي، مع mapping بصيغة `external-ip=LAN/VM`. يبقى signaling على
+`127.0.0.1:7880`، ويصل المتصفح إلى coturn عبر `turn:localhost:3478?transport=tcp`.
+لا تُنشر منافذ RTC أو relay ranges منفصلة؛ يستخدم coturn REST auth عبر
+`TURN_SHARED_SECRET` ونطاق relay محدوداً `30000-30010`. لا يستخدم LiveKit
+الـembedded TURN، بينما realtime داخل Docker يصل LiveKit عبر
+`host.docker.internal:7880`.
+Host networking requires LiveKit's bind address to be wildcard for RTC; therefore
+`7880` is not independently loopback-bound by Compose. Restrict host access with
+the existing LAN/host firewall policy rather than changing it in these scripts.
 يصل المتصفح إلى `turn:localhost:3478?transport=tcp`، ويحصل على credentials
 قصيرة العمر من realtime بعد إصدار access token. لا تُسجّل credentials ولا تُضمّن
 في إعدادات ثابتة.

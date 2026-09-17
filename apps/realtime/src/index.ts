@@ -720,10 +720,19 @@ app.post('/api/rooms/:code/conference/policy', async (req, res) => {
   const a = await hostAuth(req);
   if (!a) return fail(res, 403, 'forbidden');
   const enabled = req.body?.enabled === true;
-  conferencePolicies.set(a.room.code, enabled);
-  const room = await rooms.get(a.room.code);
-  if (room) { room.conferenceEnabled = enabled; room.sequence++; await rooms.save(room, room.sequence - 1); }
-  emitConferencePolicy(a.room.code);
+  let saved = false;
+  await enqueue(a.room.code, async () => {
+    const room = await rooms.get(a.room.code);
+    if (!room || room.participants.get(a.participant.id)?.role !== 'host') return;
+    const expected = room.sequence;
+    room.conferenceEnabled = enabled;
+    room.sequence++;
+    if (!(await rooms.save(room, expected))) return;
+    conferencePolicies.set(a.room.code, enabled);
+    saved = true;
+    emitConferencePolicy(a.room.code);
+  });
+  if (!saved) return fail(res, 503, 'persistence_failed');
   return res.json({ ...conferenceState(a.room.code), maxParticipants: 10, requireHostApproval: true });
 });
 app.get('/api/rooms/:code/conference/status', async (req, res) => {
@@ -747,7 +756,10 @@ app.post('/api/rooms/:code/conference/revoke', async (req, res) => {
   if (!a) return fail(res, 403, 'forbidden');
   const id = String(req.body?.participantId);
   conferenceGrants.get(a.room.code)?.delete(id);
-  await syncLiveKitGrant(a.room.code, id, { canPublishAudio: false, canPublishVideo: false, canPublishScreen: false, canSubscribe: true }, true);
+  // Broadcast the durable revocation without changing the active LiveKit
+  // room. The viewer stops its own tracks from this event and remains
+  // subscribed to existing remote tracks; the next token carries the denied
+  // LiveKit grant.
   emitConferenceGrant(a.room.code, id);
   return res.status(204).send();
 });
@@ -1234,14 +1246,34 @@ io.on('connection', (socket) => {
     const session = await rooms.authenticate(room.code, String(socket.data.token ?? ''));
     if (!session || session.participant.id !== participant.id)
       return ack?.({ error: 'unauthorized' });
-    const fresh = await rooms.get(room.code);
-    if (!fresh || fresh.participants.get(participant.id)?.role !== 'host')
-      return ack?.({ error: 'forbidden' });
     const enabled = Boolean((raw as { enabled?: boolean })?.enabled);
-    conferencePolicies.set(room.code, enabled);
-    fresh.conferenceEnabled = enabled; fresh.sequence++; await rooms.save(fresh, fresh.sequence - 1);
-    emitConferencePolicy(room.code);
-    ack?.({ ok: true });
+    // Serialize the policy mutation with all other room mutations.  The
+    // process-local policy cache is only changed after the durable CAS has
+    // succeeded; otherwise a failed save can advertise a state token issuance
+    // will (correctly) reject.
+    try {
+      let result: string = 'persistence_failed';
+      await enqueue(room.code, async () => {
+        const fresh = await rooms.get(room.code);
+        if (!fresh || fresh.participants.get(participant.id)?.role !== 'host') {
+          result = 'forbidden';
+          return;
+        }
+        const expected = fresh.sequence;
+        fresh.conferenceEnabled = enabled;
+        fresh.sequence++;
+        const persisted = await rooms.save(fresh, expected);
+        if (!persisted) return;
+        conferencePolicies.set(room.code, enabled);
+        emitConferencePolicy(room.code);
+        result = 'ok';
+      });
+      if (result === 'forbidden') return ack?.({ error: 'forbidden' });
+      if (result !== 'ok') return ack?.({ error: 'persistence_failed' });
+      return ack?.({ ok: true, enabled });
+    } catch {
+      return ack?.({ error: 'persistence_failed' });
+    }
   });
   socket.on('conference.grant', async (raw: unknown, ack?: (value: unknown) => void) => {
     const session = await rooms.authenticate(room.code, String(socket.data.token ?? ''));

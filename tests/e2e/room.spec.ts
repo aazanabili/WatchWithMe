@@ -40,9 +40,16 @@ test('creates a room, joins a second client, and keeps viewer controls read-only
   await expect(host.getByRole('button', { name: 'تشغيل' })).toBeEnabled();
   await expect(host.getByRole('button', { name: 'إيقاف' })).toBeEnabled();
   await expect(host.getByLabel('التقديم في الفيديو')).toBeVisible();
+  await expect(host.getByLabel('التقديم في الفيديو')).toBeEnabled();
   await host.getByRole('button', { name: 'تشغيل' }).click();
   await host.getByRole('button', { name: 'إيقاف' }).click();
-  await host.getByLabel('التقديم في الفيديو').fill('42');
+  const seek = host.getByLabel('التقديم في الفيديو');
+  await seek.evaluate((element) => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+    setter?.call(element, '42');
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+    element.dispatchEvent(new Event('change', { bubbles: true }));
+  });
   await expect(viewer.getByRole('button', { name: 'تشغيل' })).toHaveCount(0);
   await expect(viewer.getByLabel('التقديم في الفيديو')).toHaveCount(0);
   await expect(viewer.getByTestId('video-player')).not.toHaveAttribute('controls', 'true');
@@ -54,7 +61,19 @@ test('creates a room, joins a second client, and keeps viewer controls read-only
     headers: { Authorization: `Bearer ${token}` },
   });
   expect(state.ok()).toBeTruthy();
-  expect((await state.json()).snapshot.positionSeconds).toBe(42);
+  // The seek command is delivered over Socket.IO; do not race its async
+  // commit by reading the HTTP snapshot immediately after the input event.
+  await expect
+    .poll(
+      async () => {
+        const response = await request.get(`http://127.0.0.1:4000/api/rooms/${roomId}/state`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        return (await response.json()).snapshot.positionSeconds;
+      },
+      { timeout: 15_000, message: 'Host seek must be committed before the state is asserted' },
+    )
+    .toBe(42);
   await expect(viewer.locator('body')).toHaveCSS('overflow-x', 'visible');
   await host.close();
   await viewer.close();

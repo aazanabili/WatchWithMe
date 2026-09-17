@@ -16,7 +16,13 @@ resolve_livekit_node_ip() {
   [[ -n "$ip" ]] || die 'could not detect a LAN IPv4 address; set LIVEKIT_NODE_IP explicitly.'
   printf '%s' "$ip"
 }
-set_livekit_network() { :; }
+resolve_docker_host_network_ip() {
+  if [[ "${DOCKER_HOST_NETWORK_IP:-}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ && ! "${DOCKER_HOST_NETWORK_IP}" =~ ^(127\.|169\.254\.|0\.) ]]; then printf '%s' "$DOCKER_HOST_NETWORK_IP"; return; fi
+  local ip; ip="$(docker run --rm --network host --entrypoint sh alpine:3.20 -c 'ip -4 route get 1.1.1.1 | sed -n "s/.* src \([^ ]*\).*/\1/p"' 2>/dev/null | head -n1)"
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ && ! "$ip" =~ ^(127\.|169\.254\.|0\.) ]] || die 'could not detect Docker host-network IPv4; set DOCKER_HOST_NETWORK_IP explicitly.'
+  printf '%s' "$ip"
+}
+set_livekit_network() { export LIVEKIT_NODE_IP="$(resolve_livekit_node_ip)"; export DOCKER_HOST_NETWORK_IP="$(resolve_docker_host_network_ip)"; printf 'watch-with-me: LiveKit LAN IPv4=%s; Docker host-network IPv4=%s (override with LIVEKIT_NODE_IP/DOCKER_HOST_NETWORK_IP).\n' "$LIVEKIT_NODE_IP" "$DOCKER_HOST_NETWORK_IP"; }
 usage() {
   cat <<'EOF'
 Usage: watch-with-me <command>
@@ -29,6 +35,7 @@ run_compose() { "${COMPOSE[@]}" "$@"; }
 preflight() {
   command -v docker >/dev/null 2>&1 || die 'Docker CLI is not available.'
   docker info >/dev/null 2>&1 || die 'Docker daemon is unavailable; start Docker and retry.'
+  [[ -n "${LIVEKIT_NODE_IP:-}" && -n "${DOCKER_HOST_NETWORK_IP:-}" ]] || set_livekit_network
   run_compose config >/dev/null || die 'docker-compose.yml is invalid or unavailable.'
 }
 service_health() {

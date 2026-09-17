@@ -52,21 +52,15 @@ services:
     networks: [backend]
     restart: 'no'
   livekit:
-    image: livekit/livekit-server:v1.8.0@sha256:9e34703b97ceb9f622bcbb533107e4786c7aa65966f0494966a452ad41a0c0d4
-    command: ['--config', '/etc/livekit/livekit.yaml', '--node-ip', '172.28.0.10']
+    image: livekit/livekit-server:v1.13.7@sha256:5d3dcc475d064536d9948ebe4eeab8e3b24d6f07a46f6d71a3415a2901bbdc52
+    network_mode: host
+    command: ['--config', '/etc/livekit/livekit.yaml', '--node-ip', '${LIVEKIT_NODE_IP:?LIVEKIT_NODE_IP is required}']
     environment:
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-dev-watch-with-me-key-32-characters}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-dev-watch-with-me-secret-32-chars-long}
       LIVEKIT_KEYS: '${LIVEKIT_API_KEY:-dev-watch-with-me-key-32-characters}: ${LIVEKIT_API_SECRET:-dev-watch-with-me-secret-32-chars-long}'
     volumes: ['./infra/livekit/livekit.yaml:/etc/livekit/livekit.yaml:ro']
-    depends_on: { redis: { condition: service_healthy } }
-    networks:
-      frontend: null
-      backend:
-        ipv4_address: 172.28.0.10
-    # Signalling stays local; LiveKit and coturn share the backend network for
-    # internal relay traffic. Browser TURN access is published only on 3478/TCP.
-    ports: ['127.0.0.1:7880:7880']
+    # Host networking is intentional: ICE advertises the detected LAN address.
     healthcheck:
       test: ['CMD', 'wget', '--spider', '-q', 'http://localhost:7880/']
       interval: 5s
@@ -74,13 +68,10 @@ services:
       retries: 10
   coturn:
     image: coturn/coturn:4.6.3@sha256:71c3c990283385567f11794ee692e3a47b66fd9b0bb39e42afbe776e331dd888
-    command: ['-n', '--log-file=stdout', '--no-cli', '--no-tls', '--no-dtls', '--fingerprint', '--use-auth-secret', '--static-auth-secret=${TURN_SHARED_SECRET:?TURN_SHARED_SECRET is required}', '--realm=${TURN_REALM:-watch-with-me.local}', '--listening-port=3478', '--listening-ip=0.0.0.0', '--min-port=30000', '--max-port=30010']
+    network_mode: host
+    command: ['-n', '--log-file=stdout', '--no-cli', '--no-tls', '--no-dtls', '--fingerprint', '--use-auth-secret', '--static-auth-secret=${TURN_SHARED_SECRET:?TURN_SHARED_SECRET is required}', '--realm=${TURN_REALM:-watch-with-me.local}', '--listening-port=3478', '--listening-ip=0.0.0.0', '--relay-ip=${DOCKER_HOST_NETWORK_IP:?DOCKER_HOST_NETWORK_IP is required}', '--external-ip=${LIVEKIT_NODE_IP:?LIVEKIT_NODE_IP is required}/${DOCKER_HOST_NETWORK_IP:?DOCKER_HOST_NETWORK_IP is required}', '--min-port=30000', '--max-port=30010']
     environment:
       TURN_SHARED_SECRET: ${TURN_SHARED_SECRET:?TURN_SHARED_SECRET is required}
-    networks:
-      backend:
-        ipv4_address: 172.28.0.11
-    ports: ['0.0.0.0:3478:3478/tcp']
     healthcheck:
       test: ['CMD-SHELL', 'turnutils_uclient -t -p 3478 -n 1 -O -y 127.0.0.1 >/dev/null 2>&1']
       interval: 5s
@@ -122,17 +113,18 @@ services:
       MINIO_PUBLIC_ORIGIN: ${MINIO_PUBLIC_ORIGIN:-http://localhost:9000}
       ALLOW_INSECURE_LOCAL_MEDIA: ${ALLOW_INSECURE_LOCAL_MEDIA:-true}
       MINIO_REGION: us-east-1
-      LIVEKIT_URL: ws://livekit:7880
-      LIVEKIT_API_URL: http://livekit:7880
+      LIVEKIT_URL: ws://host.docker.internal:7880
+      LIVEKIT_API_URL: http://host.docker.internal:7880
       REALTIME_ORIGINS: http://localhost:3000
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-dev-watch-with-me-key-32-characters}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-dev-watch-with-me-secret-32-chars-long}
       TURN_SHARED_SECRET: ${TURN_SHARED_SECRET:?TURN_SHARED_SECRET is required}
-      TURN_URL: ${TURN_URL:-turn:localhost:3478?transport=tcp}
+      TURN_URL: ${TURN_URL:-turn:${LIVEKIT_NODE_IP}:3478?transport=tcp}
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
       coturn: { condition: service_healthy }
+    extra_hosts: ['host.docker.internal:host-gateway']
     networks: [frontend, backend]
     ports: ['127.0.0.1:4000:4000']
     command:
@@ -152,14 +144,14 @@ services:
       dockerfile: apps/web/Dockerfile
       args:
         REALTIME_INTERNAL_URL: http://realtime:4000
-        NEXT_PUBLIC_LIVEKIT_URL: ${NEXT_PUBLIC_LIVEKIT_URL:-ws://localhost:7880}
+        NEXT_PUBLIC_LIVEKIT_URL: ${NEXT_PUBLIC_LIVEKIT_URL:-ws://127.0.0.1:7880}
         NEXT_PUBLIC_LIVEKIT_RELAY_ONLY: ${NEXT_PUBLIC_LIVEKIT_RELAY_ONLY:-true}
     environment:
       HOSTNAME: 0.0.0.0
       NODE_ENV: production
       NEXT_PUBLIC_REALTIME_URL: http://localhost:4000
       REALTIME_INTERNAL_URL: http://realtime:4000
-      NEXT_PUBLIC_LIVEKIT_URL: ${NEXT_PUBLIC_LIVEKIT_URL:-ws://localhost:7880}
+      NEXT_PUBLIC_LIVEKIT_URL: ${NEXT_PUBLIC_LIVEKIT_URL:-ws://127.0.0.1:7880}
       NEXT_PUBLIC_LIVEKIT_RELAY_ONLY: ${NEXT_PUBLIC_LIVEKIT_RELAY_ONLY:-true}
     depends_on:
       realtime: { condition: service_healthy }
@@ -173,11 +165,7 @@ services:
 networks:
   frontend:
   backend:
-    # Published coturn TCP 3478 must be reachable from the host; service
-    # membership still limits coturn to this single Docker network.
-    ipam:
-      config:
-        - subnet: 172.28.0.0/24
+    internal: true
 volumes:
   postgres_data:
   redis_data:

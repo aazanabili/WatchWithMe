@@ -116,6 +116,64 @@ describe('realtime MVP integration', async () => {
     viewer.close();
   });
 
+  it('persists conference enablement before broadcasting and allows an immediate viewer token request', async () => {
+    const created = await fetch(`${address}/api/rooms`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'Conference host' }),
+    }).then((r) => r.json());
+    const joined = await fetch(`${address}/api/rooms/${created.roomCode}/join`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'Conference viewer' }),
+    }).then((r) => r.json());
+    const host = connect(address, { auth: { roomCode: created.roomCode, token: created.token } });
+    const viewer = connect(address, { auth: { roomCode: created.roomCode, token: joined.token } });
+    await Promise.all([waitFor(host, 'snapshot'), waitFor(viewer, 'snapshot')]);
+
+    const persistedAtEvent = new Promise<boolean>((resolve) => {
+      const handler = async (value: unknown) => {
+        if (!(value as { enabled?: boolean }).enabled) return;
+        viewer.off('conference.policy.changed', handler);
+        expect(value).toMatchObject({ enabled: true });
+        resolve((await rooms.get(created.roomCode))?.conferenceEnabled === true);
+      };
+      viewer.on('conference.policy.changed', handler);
+    });
+    const ack = new Promise<unknown>((resolve) => host.emit('conference.policy.changed', { enabled: true }, resolve));
+    expect(await persistedAtEvent).toBe(true);
+    expect(await ack).toMatchObject({ ok: true, enabled: true });
+
+    const tokenResponse = await fetch(`${address}/api/rooms/${created.roomCode}/conference/token`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${joined.token}` },
+    });
+    // TURN may be intentionally absent in unit runs, but policy must no
+    // longer reject a viewer after the enabled event was delivered.
+    expect(tokenResponse.status).not.toBe(403);
+    host.close();
+    viewer.close();
+  });
+
+  it('rejects a viewer conference policy mutation without changing durable state', async () => {
+    const created = await fetch(`${address}/api/rooms`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'Policy host' }),
+    }).then((r) => r.json());
+    const joined = await fetch(`${address}/api/rooms/${created.roomCode}/join`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'Policy viewer' }),
+    }).then((r) => r.json());
+    const viewer = connect(address, { auth: { roomCode: created.roomCode, token: joined.token } });
+    await waitFor(viewer, 'snapshot');
+    const result = await new Promise<unknown>((resolve) => viewer.emit('conference.policy.changed', { enabled: true }, resolve));
+    expect(result).toEqual({ error: 'forbidden' });
+    expect((await rooms.get(created.roomCode))?.conferenceEnabled).toBe(false);
+    viewer.close();
+  });
+
   it('can reconnect with the same capability and receives a snapshot', async () => {
     const created = await fetch(`${address}/api/rooms`, {
       method: 'POST',
